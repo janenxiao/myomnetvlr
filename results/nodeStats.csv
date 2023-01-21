@@ -1,0 +1,37 @@
+0,4.718993819481,vsetFull: inNetwork=1 vset={3 4 }
+3,4.719201819481,vsetFull: inNetwork=1 vset={0 4 }
+4,4.719433819481,vsetFull: inNetwork=1 vset={0 3 }
+4,6.188144707598,vsetFull: inNetwork=1 vset={3 6 }
+0,6.188352707598,vsetFull: inNetwork=1 vset={3 6 }
+6,6.188848707598,vsetFull: inNetwork=1 vset={0 4 }
+3,6.892955815766,vsetFull: inNetwork=1 vset={2 4 }
+3,6.892955815766,vsetCorrect: inNetwork=1 vset={2 4 }
+0,6.893163815766,vsetFull: inNetwork=1 vset={2 6 }
+2,6.893715815766,vsetFull: inNetwork=1 vset={0 3 }
+2,7.15332112467,vsetFull: inNetwork=1 vset={1 3 }
+2,7.15332112467,vsetCorrect: inNetwork=1 vset={1 3 }
+0,7.15373712467,vsetFull: inNetwork=1 vset={1 6 }
+1,7.15457712467,vsetFull: inNetwork=1 vset={0 2 }
+1,7.15457712467,vsetCorrect: inNetwork=1 vset={0 2 }
+4,7.433347334966,vsetFull: inNetwork=1 vset={3 5 }
+4,7.433347334966,vsetCorrect: inNetwork=1 vset={3 5 }
+6,7.433555334966,vsetFull: inNetwork=1 vset={0 5 }
+5,7.434547334966,vsetFull: inNetwork=1 vset={4 6 }
+5,7.434547334966,vsetCorrect: inNetwork=1 vset={4 6 }
+6,7.440635514207,vsetFull: inNetwork=1 vset={5 7 }
+6,7.440635514207,vsetCorrect: inNetwork=1 vset={5 7 }
+0,7.441051514207,vsetFull: inNetwork=1 vset={1 7 }
+0,7.441051514207,vsetCorrect: inNetwork=1 vset={1 7 }
+7,7.441643514207,vsetFull: inNetwork=1 vset={0 6 }
+7,7.441643514207,vsetCorrect: inNetwork=1 vset={0 6 }
+3,100,beforeLinkFailure: { 4 }
+3,300,beforeLinkRestart: { 4 }
+4,300.000016,beforeLinkRestart: 3
+0,7139.578036378622,nodeStats,[ 3 4 ],1,1,{1 7 },{},2,2,5,12,finish
+1,7139.578036378622,nodeStats,[ 2 7 ],1,1,{0 2 },{4:1:3 6:1:3 2:1:2 3:1:4 0:1:4 },2,2,5,5,finish
+2,7139.578036378622,nodeStats,[ 1 4 6 7 ],1,1,{1 3 },{0:2:3 3:2:3 },4,2,5,11,finish
+3,7139.578036378622,nodeStats,[ 0 4 5 7 ],1,1,{2 4 },{},4,2,5,9,finish
+4,7139.578036378622,nodeStats,[ 0 2 3 6 ],1,1,{3 5 },{7:4:3 3:4:2 },4,2,5,12,finish
+5,7139.578036378622,nodeStats,[ 3 7 ],1,1,{4 6 },{2:5:4 6:5:5 4:5:3 0:5:3 },2,2,5,4,finish
+6,7139.578036378622,nodeStats,[ 2 4 ],1,1,{5 7 },{3:6:3 0:6:3 },2,2,5,5,finish
+7,7139.578036378622,nodeStats,[ 1 2 3 5 ],1,1,{0 6 },{6:7:3 0:7:3 },4,2,5,3,finish
