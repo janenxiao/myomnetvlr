@@ -53,10 +53,13 @@ class Vrr : public RoutingBase
     bool sendRepairLocalNoTemp;           // whether to send out repairLocalReply instead of tearing down broken vroutes directly
     double repairLinkReqWaitTime;         // wait time before tearing down broken vroutes
     static const int repairLinkReqRetryLimit = 1;
+    bool removeBrokenVrouteEndpointInRepair;
 
     // statistics measurement
     bool sendTestPacket;
     static const int testSendInterval = 10;         // time interval to send a test message for statistics measurement
+    static const bool recordReceivedMsg = false;          // record received message (may not be directed to me) with recordMessageRecord(/*action=*/2
+    static const bool recordDroppedMsg = true;          // record message arrived and destined for me, or dropped at me with recordMessageRecord(/*action=*/1 or 4
     unsigned int numTestPacketReceived = 0;       // number of test messages received (handled or forwarded)
 
     // time to start sending TestPacket
@@ -73,7 +76,7 @@ class Vrr : public RoutingBase
     cMessage *fillVsetTimer = nullptr;          // timer to fill up / check on vset, send setupReq if needed
     cMessage *inNetworkWarmupTimer = nullptr;   // timer to change selfInNetwork to true
     // cMessage *repSeqExpirationTimer = nullptr;   // timer to purge an expired rep sequence number
-    cMessage *nonEssRouteTeardownTimer = nullptr;   // timer to change selfInNetwork to true
+    cMessage *nonEssRouteTeardownTimer = nullptr;   // timer to clear nonEssRoutes
     
     cMessage *testPacketTimer = nullptr;          // timer to send testPacket for statistics measurement
 
@@ -107,11 +110,12 @@ class Vrr : public RoutingBase
 
     virtual void handleStartOperation() override;
     virtual void handleStopOperation() override;
-    virtual void handleFailureLinkSimulation(const std::set<unsigned int>& failedPneis) override;
+    virtual void handleFailureLinkSimulation(const std::set<unsigned int>& failedPneis, int failedGateIndex=-1) override;
     virtual void handleFailureLinkRestart(const std::set<unsigned int>& restartPneis) override;
     virtual void handleFailureNodeRestart() override;
     virtual void processFailedPacket(cPacket *packet, unsigned int pneiVid) override;
     virtual void writeRoutingTableToFile() override;
+    virtual void recordCurrentNodeStats(const char *stage) override;
 
     // handling messages
     void processSelfMessage(cMessage *message);
@@ -210,6 +214,7 @@ class Vrr : public RoutingBase
     int getVlrUniPacketByteLength() const;
     /** set setupPacke->srcVset array based on vset and pendingVset, return number of nodes added to srcVset */
     unsigned int setupPacketSrcVset(VlrIntSetupPacket *setupPacket, const std::set<VlrRingVID> *srcVsetPtr=nullptr) const;
+    VlrRingVID getMessagePrevhopVid(cMessage *message) const;
 
     // node status helper
     void removeRouteFromLostPneiBrokenVroutes(const VlrPathID& pathid, const VlrRingVID& lostPneiVid);

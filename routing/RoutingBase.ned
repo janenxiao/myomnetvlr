@@ -32,6 +32,8 @@ simple RoutingBase like IRouting
 
         string routingTableVidCSVFile = default("");    // if provided, write vlrRoutingTable at nodes to file after some time
         string writeRoutingTableToFileTimes = default("");    // time after start to write vlrRoutingTable to file if routingTableVidCSVFile provided, e.g. "500, 1000"
+
+        string writeNodeStatsTimes = default("");    // time after start to record nodeStats to allNodeRecords, e.g. "500, 1000", if not specified, will only record nodeStats in finish()
         
     gates:
         input in[];

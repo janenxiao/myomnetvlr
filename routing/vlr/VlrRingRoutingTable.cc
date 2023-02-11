@@ -35,6 +35,9 @@ std::pair<std::map<VlrPathID, VlrRingRoutingTable::VlrRingRoute>::iterator, bool
     if (!itr_bool.second)   // if pathid already exists in routing table
         return itr_bool;
     // VlrRingRoute* routePtr = &(itr_bool.first->second);
+    
+    if (fromVid == 215 && toVid == 215)
+        EV_DEBUG << "ohno" << endl;
 
     // insert route in endpointToRoutesMap
     endpointToRoutesMap[fromVid].insert(pathid);

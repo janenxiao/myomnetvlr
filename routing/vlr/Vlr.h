@@ -111,12 +111,17 @@ class Vlr : public RoutingBase
     // statistics measurement
     bool sendTestPacket;
     static const double testSendInterval;         // time interval to send a test message for statistics measurement
+    static const bool recordReceivedMsg = false;          // record received message (may not be directed to me) with recordMessageRecord(/*action=*/2
+    static const bool recordDroppedMsg = true;          // record message arrived and destined for me, or dropped at me with recordMessageRecord(/*action=*/1 or 4
     unsigned int numTestPacketReceived = 0;       // number of test messages received (handled or forwarded)
 
     // time to start sending TestPacket
     static const double sendTestPacketOverlayWaitTime;  // wait time after last node joined overlay before changing sendTestPacketStart to true
     static double lastTimeNodeJoinedInNetwork;  // last time that a node joined overlay
     static bool sendTestPacketStart;    // if we've started sending TestPacket (start sending once all nodes have joined the overlay)
+
+    static bool firstRepSeqTimeoutCSVFileWritten;         // [ definition in VlrBase.cc file ] default false
+    // static bool totalNumBeacomSentCSVFileCreated;         // [ definition in VlrBase.cc file ] default false
 
     // context
     cModule *host = nullptr;
@@ -129,6 +134,7 @@ class Vlr : public RoutingBase
     cMessage *repSeqExpirationTimer = nullptr;   // timer to purge an expired rep sequence number  NOTE only used when representativeFixed=true and I'm not the predefined rep
     cMessage *repSeqObserveTimer = nullptr;     // timer to start looking for overlay after rep-timeout, when scheduled, I just left overlay bc rep-timeout, don't try to join a new overlay right away, wait for beaconInterval so my pneis also rep-timeout
     cMessage *delayedRepairReqTimer = nullptr;     // timer to check delayedRepairLinkReq or delayedRepairLocalReq after new link breakage detected
+    cMessage *recentReplacedVneiTimer = nullptr;     // timer to clear recentReplacedVneis
     
     cMessage *testPacketTimer = nullptr;          // timer to send testPacket for statistics measurement
 
@@ -148,6 +154,8 @@ class Vlr : public RoutingBase
     static const int representativeMapMaxSize = 6;         // max number of reps (excluding myself) in representativeMap, NOTE can include expired records
 
     unsigned int totalNumBeaconSent = 0;
+    static unsigned int totalNumRepSeqTimeout;
+    static double firstRepSeqTimeoutTime;
 
     int vsetHalfCardinality;
     int vsetAndBackupHalfCardinality; // vsetHalfCardinality + backupVsetHalfCardinality
@@ -175,6 +183,8 @@ class Vlr : public RoutingBase
     std::set<VlrPathID> nonEssUnwantedRoutes;     // pathids (of patched vroutes or temporary routes) in nonEssRoutes that should be torn down after expiry even though it may lead to a vnei or pendingVnei
   
     std::map<VlrRingVID, simtime_t> recentSetupReqFrom; // not needed now bc multiple vset-routes btw vneis allowed -- nodes I've recently received setupReq from and accepted as vnei, map it to its expiration time (after which it'll be removed from this map)
+    std::set<VlrRingVID> recentReplacedVneis;    // past vneis that I recently removed from vset because a closer vnei was added
+    bool sendNotifyVsetToReplacedVnei;
 
     std::map<VlrRingVID, LostPneiInfo> lostPneis;   // nodes to which I've sent repairLinkReq, they were once my pneis but are no longer connected, which broke some vset routes
     // std::map<VlrPathID, std::pair<VlrRingVID, VlrRingVID>> brokenRoutes;   // map broken vroute <pathid> to <lostPnei> (lost prevhop (I'll send repairLinkReq), lost nexthop (I'll receive repairLinkReq)) where lostPneis[lostPnei].brokenVroutes contains pathid
@@ -210,11 +220,12 @@ class Vlr : public RoutingBase
 
     virtual void handleStartOperation() override;
     virtual void handleStopOperation() override;
-    virtual void handleFailureLinkSimulation(const std::set<unsigned int>& failedPneis) override;
+    virtual void handleFailureLinkSimulation(const std::set<unsigned int>& failedPneis, int failedGateIndex=-1) override;
     virtual void handleFailureLinkRestart(const std::set<unsigned int>& restartPneis) override;
     virtual void handleFailureNodeRestart() override;
     virtual void processFailedPacket(cPacket *packet, unsigned int pneiVid) override;
     virtual void writeRoutingTableToFile() override;
+    virtual void recordCurrentNodeStats(const char *stage) override;
 
     // handling messages
     void processSelfMessage(cMessage *message);
@@ -263,6 +274,9 @@ class Vlr : public RoutingBase
     virtual void processRepSeqObserveTimer();
     // handling inNetwork wait time
     virtual void processInNetworkWarmupTimer();
+
+    // handling recentReplacedVneiTimer to clear recentReplacedVneis
+    virtual void processRecentReplacedVneiTimer();
 
     // handling SetupReq
     /** SetupReq timeout, resend setupReq if needed */
@@ -387,6 +401,7 @@ class Vlr : public RoutingBase
     int getVlrUniPacketByteLength() const;
     /** set setupPacke->srcVset array based on vset and pendingVset, return number of nodes added to srcVset */
     unsigned int setupPacketSrcVset(VlrIntSetupPacket *setupPacket) const;
+    VlrRingVID getMessagePrevhopVid(cMessage *message) const;
 
     // node status helper
     VlrRingVID getProxyForSetupReq(bool checkInNetwork=true) const;
@@ -408,9 +423,10 @@ class Vlr : public RoutingBase
     void pendingVsetErase(VlrRingVID node);
     void vsetInsertRmPending(VlrRingVID node);
     bool vsetEraseAddPending(VlrRingVID node);
-    void delayRouteTeardown(const VlrRingVID& oldVnei, const std::set<VlrPathID>& oldVsetRoutes);
+    void delayRouteTeardown(const VlrRingVID& oldVnei, const std::set<VlrPathID>& oldVsetRoutes, bool sendNotifyVset=true);
     void delayLostPneiTempVlinksTeardown(const std::set<VlrPathID>& tempVlinks, double delay);
     void removeRouteFromLostPneiBrokenVroutes(const VlrPathID& pathid, const VlrRingVID& lostPneiVid);
+    bool checkLostPneiTempVlinksNotRecent(const std::set<VlrPathID>& tempVlinks) const;
     
     /** return true if node has scheduled setupReq timer in pendingVset */
     bool hasSetupReqPending() const;
@@ -430,6 +446,8 @@ class Vlr : public RoutingBase
     /** print vset for EV_INFO purpose */
     std::string printVsetToString() const;
     std::string printRoutesToMeToString() const;
+    void writeFirstRepSeqTimeoutToFile(bool writeAtFinish);
+    void writeTotalNumBeacomSentToFile();
 };
 
 }; // namespace omnetvlr

@@ -2,6 +2,7 @@
 out/
 .settings/
 networks/
+results/
 
 # Prerequisites
 *.d

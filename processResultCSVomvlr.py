@@ -566,8 +566,35 @@ def genGraphEdgelistFile(graphType, filepath, numCols, numNodes):
         # nx.draw(G, with_labels=True, pos=nodePositions)
         # plt.show()
 
-    # elif graphType == "powerlaw2":
-    #     df
+    elif graphType == "powerlaw2":
+        # G = nx.powerlaw_cluster_graph(numNodes, 2, 0.5)
+        # read graph from existing file
+        edgelistFileToRead = f"{filepath}edgelist_{graphType}-{numNodes}-nonConsec.csv"
+        G = nx.read_edgelist(edgelistFileToRead, delimiter=',', nodetype=int)  # physical graph
+
+        labelMapping = dict(zip(G.nodes, labelList))
+        G = nx.relabel_nodes(G, labelMapping, copy=True)   # copy=False
+
+        # write node vid file
+        vidAssignmentFile = f"{filepath}vidlist_{graphType}_{numNodes}_maxId60000.csv"
+        with open(vidAssignmentFile, 'w') as file:
+            for label in labelList:
+                file.write(f"{label}\n")
+
+        # write edgelistFile and gpickleFile
+        edgelistFile = f"{filepath}PGedgelist_{graphType}_{numNodes}.csv"
+        gpickleFile = f"{filepath}PGpickle_{graphType}_{numNodes}.gpickle"
+        with open(edgelistFile, 'wb') as fh:    # need to have the directory created
+            nx.write_edgelist(G, fh, delimiter=',', data=False)
+        # write NetworkX graphs as Python pickle
+        if gpickleFile is not None and type(gpickleFile) == str:
+            nx.write_gpickle(G, gpickleFile)
+
+        # # print(nx.info(G))
+        # # print(G.nodes(data=True))
+        # nx.draw(G, with_labels=True)
+        # plt.show()
+
 
     elif graphType == "pathGraph":
         G = nx.path_graph(numNodes)     # return the Path graph of <numNodes> linearly connected nodes
@@ -615,7 +642,8 @@ def readGraphpickle(graphType, filepath, numCols, numNodes):
         with open(vidAssignmentFile, 'w') as file:
             for tup in labelPosTuples:
                 file.write(f"{tup[0]}\n")
-    
+
+ 
 
 def genFailureScenarioFileFromVid(graphType, filepath, numNodes, failureType, repType, repCase, nofailNodes):
     # labelList = []
@@ -875,9 +903,9 @@ def checkupResultTestFile(testfileToRead):
 
 
 if __name__ == "__main__":
-    graphType = "pathGraph"    # squareGrid
-    graphCase = "g0"
-    numNodes = 500
+    graphType = "powerlaw2"    # squareGrid, powerlaw2, pathGraph
+    graphCase = "g1"
+    numNodes = 5000
     maxDeliveryTime = 50    # TestPacket that aren't recorded "arrived" within sendTime + maxDeliveryTime will be considered failed
     testpathsStartTime = 700
 

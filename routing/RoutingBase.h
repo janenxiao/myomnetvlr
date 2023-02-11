@@ -47,6 +47,7 @@ class RoutingBase : public cSimpleModule
     cMessage *failureSimulationTimer = nullptr; // time for me to simulate node/link failure
     cMessage *vidRingRegVsetTimer = nullptr; // time for me to change vidRingRegVset according to vidRingRegistry
     cMessage *writeRoutingTableTimer = nullptr;   // timer to write vlrRoutingTable to write vlrRoutingTable at nodes to file
+    cMessage *writeNodeStatsTimer = nullptr;   // timer to record nodeStats to allNodeRecords
 
     // statistics collection
     std::vector<unsigned int> testDstList;  // predetermined list of node vids (read from testDstAssignmentFile) to send TestPacket
@@ -60,10 +61,13 @@ class RoutingBase : public cSimpleModule
     static std::vector<double> writeRoutingTableToFileTimes;  // time after start to write vlrRoutingTable to file
     static bool routingTableVidCSVFileCreated;         // [ definition in VlrBase.cc file ] default false, first node that writes to the file should change this to true
 
+    static std::vector<double> writeNodeStatsTimes;  // time after start to record nodeStats to allNodeRecords
+
     // failure simulation
     static std::map<unsigned int, std::vector<std::tuple<double, std::string, std::set<unsigned int>>>> failureSimulationMap;  // {node1, [(100, "stop", {node2, node3})]} means node1 stops processing messages from node2 and node3 after 100s; {node1, [(100, "stop", {})]} means node1 stops processing messages (node failure) after 100s
     std::map<unsigned int, int> failureSimulationPneiVidMap;   // pnei vids from which I won't process messages in order to simulate link failures, map pnei to its gate index at me
     std::set<int> failureSimulationPneiGates;   // pnei gate indexes from which I won't process messages in order to simulate link failures
+    std::set<unsigned int> failureSimulationUnaddedPneiVids;  // pnei vids that haven't been added to failureSimulationPneiVidMap bc I don't know their corresponding gete index yet, once I receive a msg from any of them, I'll add it to failureSimulationPneiVidMap
     bool selfNodeFailure = false;   // if true, I'm simulating node failure and I won't process any VLR messages
     std::map<int, FailedPacketDelayTimer *> failureGateToPacketMap;   // store failed packet to some gateIndex to process later, simulate time for sending a packet multiple times b4 signaling a link break 
 
@@ -104,21 +108,24 @@ class RoutingBase : public cSimpleModule
     void sendCreatedPacket(cPacket *packet, bool unicast, int outGateIndex, double delay=0, bool checkFail=true, const std::vector<int> *exclOutGateIndexes=nullptr);
 
     // handling failure simulation timer timeout
-    virtual void processFailureSimulationTimer();
+    void processFailureSimulationTimer();
     // handling timer timeout to set vidRingRegVset based on vidRingRegistry
-    virtual void processVidRingRegVsetTimer(int numHalf);
+    void processVidRingRegVsetTimer(int numHalf);
     // handling timer timeout to process failed packet
     void processFailedPacketDelayTimer(FailedPacketDelayTimer *failedpktTimer);
     // handling write vlrRoutingTable to file timer timeout
-    virtual void processWriteRoutingTableTimer();
+    void processWriteRoutingTableTimer();
+    // handling write nodeStats timer timeout
+    void processWriteNodeStatsTimer();
 
     virtual void handleStartOperation();
     virtual void handleStopOperation() = 0;
-    virtual void handleFailureLinkSimulation(const std::set<unsigned int>& failedPneis) = 0;
+    virtual void handleFailureLinkSimulation(const std::set<unsigned int>& failedPneis, int failedGateIndex=-1) = 0;
     virtual void handleFailureLinkRestart(const std::set<unsigned int>& restartPneis) = 0;
     virtual void handleFailureNodeRestart() = 0;
     virtual void processFailedPacket(cPacket *packet, unsigned int pneiVid) = 0;
     virtual void writeRoutingTableToFile() = 0;
+    virtual void recordCurrentNodeStats(const char *stage) = 0;
 
     // const functions
     /** return numHalf nodes close to me in ccw/cw direction in traceSet */
@@ -158,6 +165,7 @@ class RoutingBase : public cSimpleModule
     void initializeFailureSimulationMap();
     void initializeSelfTestDstList();
     void initializeWriteRoutingTableToFileTimes();
+    void initializeWriteNodeStatsTimes();
     VlrRingVID getRandomVidInRegistry();
 
     // statistics helper

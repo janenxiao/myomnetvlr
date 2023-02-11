@@ -36,6 +36,7 @@ simple Vrr extends RoutingBase
 
         bool sendRepairLocalNoTemp = default(true);  // whether to send repairLocalReply instead of tearing down broken vroutes directly
         double repairLinkReqWaitTime @unit(s) = default(neighborValidityInterval + 1s);     // wait time for repairLocalReply for vroute whose nexthop is lost before tearing it down
+        bool removeBrokenVrouteEndpointInRepair = default(true);  // whether to remove brokenVroute endpoint from endpointToRoutesMap when prevhop/nexthop unavailable, if false and selected brokenVroute whose next hop is unavailable in findNextHop(), message can be dropped to prevent loop
 
         // statistics measurement
         bool sendTestPacket = default(true);	// send test messages for hop count measurement purpose

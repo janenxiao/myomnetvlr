@@ -27,6 +27,8 @@ const unsigned int RoutingBase::allSendRecordsCapacity = 65536;
 bool RoutingBase::routingTableVidCSVFileCreated = false;
 std::vector<double> RoutingBase::writeRoutingTableToFileTimes;
 
+std::vector<double> RoutingBase::writeNodeStatsTimes;
+
 
 RoutingBase::~RoutingBase()
 {
@@ -34,6 +36,7 @@ RoutingBase::~RoutingBase()
     cancelAndDelete(failureSimulationTimer);
     cancelAndDelete(vidRingRegVsetTimer);
     cancelAndDelete(writeRoutingTableTimer);
+    cancelAndDelete(writeNodeStatsTimer);
 
     for (auto& elem : failureGateToPacketMap)
         cancelAndDelete(elem.second);
@@ -222,6 +225,14 @@ void RoutingBase::initialize()
     failureSimulationTimer = new cMessage("failureSimulationTimer");
     vidRingRegVsetTimer = new cMessage("vidRingRegVsetTimer");
     writeRoutingTableTimer = new cMessage("writeRoutingTableTimer");
+    writeNodeStatsTimer = new cMessage("writeNodeStatsTimer");
+
+    // initialize static non-const variables for multiple ${repetition} or ${runnumber} bc cmdenv runs simulations in the same process, this means that e.g. if one simulation run writes a global variable, subsequent runs will also see the change
+    resultNodeCSVFileCreated = false;
+    resultTestCSVFileCreated = false;
+    routingTableVidCSVFileCreated = false;
+    ASSERT(allSendRecords.empty());
+    ASSERT(allNodeRecords.empty());
 
     // initialize failureSimulationMap
     if (failureSimulationMap.empty()) {
@@ -241,6 +252,8 @@ void RoutingBase::initialize()
 
     // schedule first writeRoutingTableTimer if file provided
     initializeWriteRoutingTableToFileTimes();
+    // schedule first writeNodeStatsTimer if writeNodeStatsTimes provided
+    initializeWriteNodeStatsTimes();
 }
 
 void RoutingBase::sendCreatedPacket(cPacket *packet, bool unicast, int outGateIndex, double delay/*=0*/, bool checkFail/*=true*/, const std::vector<int> *exclOutGateIndexes/*=nullptr*/)
@@ -669,6 +682,46 @@ void RoutingBase::initializeWriteRoutingTableToFileTimes()
             throw cRuntimeError("RoutingTable write file specified but writeRoutingTableToFileTimes is empty");
         scheduleAt(writeRoutingTableToFileTimes[0], writeRoutingTableTimer);
     }
+}
+
+void RoutingBase::initializeWriteNodeStatsTimes()
+{
+    // get write routingTable to file and times, see if it's provided
+    const char *writeTimesPar = par("writeNodeStatsTimes");
+    if (strlen(writeTimesPar) > 0) {    // write times string provided
+        if (writeNodeStatsTimes.empty()) {     // writeNodeStatsTimes not initialized yet
+            cStringTokenizer tokenizer(writeTimesPar, /*delimiters=*/", ");
+            const char *token;
+            while ((token = tokenizer.nextToken()) != nullptr)
+                writeNodeStatsTimes.push_back((double)atoi(token));
+
+            EV_INFO << "Initialized writeNodeStatsTimes = [";
+            for (const auto& time : writeNodeStatsTimes)
+                EV_INFO << time << ' ';
+            EV_INFO << "]" << endl;
+        }
+        if (writeNodeStatsTimes.empty())
+            throw cRuntimeError("Write nodeStats times specified but writeNodeStatsTimes is empty");
+        scheduleAt(writeNodeStatsTimes[0], writeNodeStatsTimer);
+    }
+}
+
+void RoutingBase::processWriteNodeStatsTimer()
+{
+    EV_DEBUG << "Processing writeNodeStatsTimer at node " << vid << endl;
+    // find the timestamp that triggered this timer
+    simtime_t currTime = simTime();
+    int i = writeNodeStatsTimes.size() -1;
+    for ( ; i >= 0; i--) {
+        if (currTime >= writeNodeStatsTimes.at(i))
+            break;
+    }
+    ASSERT(i >= 0);     // timer has timed out bc a timestamp in writeNodeStatsTimes vector has been reached
+    // record nodeStats
+    recordCurrentNodeStats(/*stage=*/"midway");
+    // schedule next writeNodeStatsTimer
+    if (i < writeNodeStatsTimes.size() -1)     // more writeNodeStats timer to schedule
+        scheduleAt(writeNodeStatsTimes.at(i+1), writeNodeStatsTimer);
 }
 
 // record message record in allSendRecords

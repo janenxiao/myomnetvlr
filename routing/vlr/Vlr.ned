@@ -51,10 +51,15 @@ simple Vlr extends RoutingBase
         bool keepDismantledRoute = default(true);	// whether to keep dismantled route (Teardown has been sent/received) in vlrRoutingTable for some time (dismantledRouteExpiration) to help with rebuild of broken vroutes
         bool checkOverHeardTraces = default(true);  // whether to record trace to pendingVnei if I receive a setupReq/repairLinkReply with trace (not destined for me)
         bool sendPeriodicNotifyVset = default(true);  // whether to send NotifyVset periodically
+        bool sendNotifyVsetToReplacedVnei = default(true);  // whether to send NotifyVset to vneis removed immediately after adding a new vnei
         bool sendRepairLocalNoTemp = default(false);  // whether to send repairLocalReq instead of building temporary route with repairLinkReq, if true, set setupTempRoute to true
 
         // statistics measurement
         bool sendTestPacket = default(true);	// send test messages for hop count measurement purpose
+
+        int simulationSeed = default(0);
+        string firstRepSeqTimeoutCSVFile = default("");    // if provided, first repSeq timeout will be written to file
+        string totalNumBeacomSentCSVFile = default("");    // if provided, totalNumBeaconSent will be written to file at end of simulation
 
         // visualization parameters
         bool displayBubbles = default(false);	// display bubble messages about routing state for packets
