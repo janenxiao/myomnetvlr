@@ -23,6 +23,7 @@ std::vector<std::string> RoutingBase::allNodeRecords;
 bool RoutingBase::resultNodeCSVFileCreated = false;
 bool RoutingBase::resultTestCSVFileCreated = false;
 const unsigned int RoutingBase::allSendRecordsCapacity = 65536;
+std::set<unsigned int> RoutingBase::nodesVsetCorrect;
 
 bool RoutingBase::routingTableVidCSVFileCreated = false;
 std::vector<double> RoutingBase::writeRoutingTableToFileTimes;
@@ -231,8 +232,11 @@ void RoutingBase::initialize()
     resultNodeCSVFileCreated = false;
     resultTestCSVFileCreated = false;
     routingTableVidCSVFileCreated = false;
+    nodesVsetCorrect.clear();
     ASSERT(allSendRecords.empty());
     ASSERT(allNodeRecords.empty());
+
+    simulateBeaconLostRate = par("simulateBeaconLostRate");
 
     // initialize failureSimulationMap
     if (failureSimulationMap.empty()) {

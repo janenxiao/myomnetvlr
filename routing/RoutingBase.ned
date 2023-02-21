@@ -34,6 +34,8 @@ simple RoutingBase like IRouting
         string writeRoutingTableToFileTimes = default("");    // time after start to write vlrRoutingTable to file if routingTableVidCSVFile provided, e.g. "500, 1000"
 
         string writeNodeStatsTimes = default("");    // time after start to record nodeStats to allNodeRecords, e.g. "500, 1000", if not specified, will only record nodeStats in finish()
+
+        double simulateBeaconLostRate = default(0);	  // value in range [0, 1), ratio at which I'll ignore received broadcast messages to simulate loss because of collision (because broadcast messages aren't retransmitted)
         
     gates:
         input in[];

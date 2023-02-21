@@ -242,40 +242,46 @@ void Vlr::processMessage(cMessage *message)
         } else
             EV_WARN << "Received packet from failed link, me=" << vid << ", selfNodeFailure=" << selfNodeFailure << ", ignoring packet " << message->getName() << endl;
     } else {
+        bool processPkt = true;
         if (auto unicastPacket = dynamic_cast<VlrIntUniPacket *>(message)) {
             VlrRingVID msgPrevHopVid = unicastPacket->getVlrOption().getPrevHopVid();
             if (msgPrevHopVid != VLRRINGVID_NULL)
                 psetTable.setRecvNeiGateIndex(msgPrevHopVid, pktGateIndex);
-        }  
+        } else if (simulateBeaconLostRate > 0 && uniform(0, 1) < simulateBeaconLostRate) {  // broadcast message
+            EV_WARN << "Received broadcast packet and simulating packet loss due to collision, me=" << vid << ", ignoring packet " << message->getName() << endl;
+            processPkt = false;
+        }
 
-        if (auto beacon = dynamic_cast<VlrIntBeacon *>(message))
-            processBeacon(beacon, pktForwarded);
-        else if (auto setupReq = dynamic_cast<SetupReqInt *>(message))
-            processSetupReq(setupReq, pktForwarded);
-        else if (auto setupReply = dynamic_cast<SetupReplyInt *>(message))
-            processSetupReply(setupReply, pktForwarded);
-        else if (auto setupFail = dynamic_cast<SetupFailInt *>(message))
-            processSetupFail(setupFail, pktForwarded);
-        else if (auto addRoute = dynamic_cast<AddRouteInt *>(message))
-            processAddRoute(addRoute, pktForwarded);
-        else if (auto teardown = dynamic_cast<TeardownInt *>(message))
-            processTeardown(teardown, pktForwarded);
-        else if (auto testpacket = dynamic_cast<VlrIntTestPacket *>(message))
-            processTestPacket(testpacket, pktForwarded);
-        else if (auto repairLinkReq = dynamic_cast<RepairLinkReqFloodInt *>(message))
-            processRepairLinkReqFlood(repairLinkReq, pktForwarded);
-        else if (auto repairLinkReply = dynamic_cast<RepairLinkReplyInt *>(message))
-            processRepairLinkReply(repairLinkReply, pktForwarded);
-        else if (auto repairRoute = dynamic_cast<RepairRouteInt *>(message))
-            processRepairRoute(repairRoute, pktForwarded);
-        else if (auto notifyVset = dynamic_cast<NotifyVsetInt *>(message))
-            processNotifyVset(notifyVset, pktForwarded);
-        else if (auto repairLocalReq = dynamic_cast<RepairLocalReqFloodInt *>(message))
-            processRepairLocalReqFlood(repairLocalReq, pktForwarded);
-        else if (auto repairLocalReply = dynamic_cast<RepairLocalReplyInt *>(message))
-            processRepairLocalReply(repairLocalReply, pktForwarded);
-        else if (auto repairLocalPrev = dynamic_cast<RepairLocalPrevInt *>(message))
-            processRepairLocalPrev(repairLocalPrev, pktForwarded);
+        if (processPkt) {
+            if (auto beacon = dynamic_cast<VlrIntBeacon *>(message))
+                processBeacon(beacon, pktForwarded);
+            else if (auto setupReq = dynamic_cast<SetupReqInt *>(message))
+                processSetupReq(setupReq, pktForwarded);
+            else if (auto setupReply = dynamic_cast<SetupReplyInt *>(message))
+                processSetupReply(setupReply, pktForwarded);
+            else if (auto setupFail = dynamic_cast<SetupFailInt *>(message))
+                processSetupFail(setupFail, pktForwarded);
+            else if (auto addRoute = dynamic_cast<AddRouteInt *>(message))
+                processAddRoute(addRoute, pktForwarded);
+            else if (auto teardown = dynamic_cast<TeardownInt *>(message))
+                processTeardown(teardown, pktForwarded);
+            else if (auto testpacket = dynamic_cast<VlrIntTestPacket *>(message))
+                processTestPacket(testpacket, pktForwarded);
+            else if (auto repairLinkReq = dynamic_cast<RepairLinkReqFloodInt *>(message))
+                processRepairLinkReqFlood(repairLinkReq, pktForwarded);
+            else if (auto repairLinkReply = dynamic_cast<RepairLinkReplyInt *>(message))
+                processRepairLinkReply(repairLinkReply, pktForwarded);
+            else if (auto repairRoute = dynamic_cast<RepairRouteInt *>(message))
+                processRepairRoute(repairRoute, pktForwarded);
+            else if (auto notifyVset = dynamic_cast<NotifyVsetInt *>(message))
+                processNotifyVset(notifyVset, pktForwarded);
+            else if (auto repairLocalReq = dynamic_cast<RepairLocalReqFloodInt *>(message))
+                processRepairLocalReqFlood(repairLocalReq, pktForwarded);
+            else if (auto repairLocalReply = dynamic_cast<RepairLocalReplyInt *>(message))
+                processRepairLocalReply(repairLocalReply, pktForwarded);
+            else if (auto repairLocalPrev = dynamic_cast<RepairLocalPrevInt *>(message))
+                processRepairLocalPrev(repairLocalPrev, pktForwarded);
+        }
     }
 
     if (!pktForwarded)
@@ -487,15 +493,22 @@ VlrIntBeacon* Vlr::createBeacon()
         VlrIntRepState& repstate = beacon->getRepstateForUpdate();
         repstate.vid = VLRRINGVID_NULL;
         if (representative.heardfromvid != VLRRINGVID_NULL) {       // I have rep-path to predefined rep
+            bool sendRepInfo = true;
             if (representative.vid == vid)
                 representative.sequencenumber++;
-
-            repstate.vid = representative.vid;                          // vidByteLength
-            repstate.sequencenumber = representative.sequencenumber;    // 4 byte
-            // repstate.hopcount = representative.hopcount;             // 2 byte
-            repstate.inNetwork = representative.inNetwork;              // 1 bit, ignored
-            representative.lastBeaconSeqnumUnchanged = (representative.sequencenumber == representative.lastBeaconSeqnum);
-            representative.lastBeaconSeqnum = representative.sequencenumber;
+            else if (repSeqExpirationTimer->isScheduled() && simTime() - (repSeqExpirationTimer->getArrivalTime() - repSeqValidityInterval) > beaconInterval + maxJitter) {  // lastHeard of rep > max interval btw two beacons
+                if (representative.sequencenumber > representative.lastBeaconSeqnum)    // bc I must have sent a beacon after lastHeard of rep with new rep seqNo, so lastBeaconSeqnum should have been updated to sequencenumber
+                    throw cRuntimeError("Skipping repstate for representativeFixed with new seqNo = %d than last beaconed seqNo = %d at me=%d", representative.sequencenumber, representative.lastBeaconSeqnum, vid);
+                sendRepInfo = false;
+            }
+            if (sendRepInfo) {
+                repstate.vid = representative.vid;                          // vidByteLength
+                repstate.sequencenumber = representative.sequencenumber;    // 4 byte
+                // repstate.hopcount = representative.hopcount;             // 2 byte
+                repstate.inNetwork = representative.inNetwork;              // 1 bit, ignored
+                representative.lastBeaconSeqnumUnchanged = (representative.sequencenumber == representative.lastBeaconSeqnum);
+                representative.lastBeaconSeqnum = representative.sequencenumber;
+            }
         } else
             representative.lastBeaconSeqnumUnchanged = false;
 
@@ -518,10 +531,11 @@ VlrIntBeacon* Vlr::createBeacon()
             repstate.sequencenumber = ++selfRepSeqnum;      // 4 byte
             // repstate.hopcount = representative.hopcount; // 2 byte
             repstate.inNetwork = selfInNetwork;             // 1 bit, ignored
+            // EV_WARN << "Sending beacon with me as rep: me = " << vid << ", selfRepSeqnum = " << selfRepSeqnum << ", inNetwork = " << selfInNetwork << ", vset = " << printVsetToString() << endl;
         }
         simtime_t expiredLastheard = simTime() - repSeqValidityInterval;
         for (auto repMapItr = representativeMap.begin(); repMapItr != representativeMap.end(); ++repMapItr) {
-            if (repMapItr->second.heardfromvid != VLRRINGVID_NULL && repMapItr->second.lastHeard > expiredLastheard) {  // rep hasn't expired
+            if (repMapItr->second.heardfromvid != VLRRINGVID_NULL && repMapItr->second.lastHeard > expiredLastheard && simTime() - repMapItr->second.lastHeard <= beaconInterval + maxJitter) {  // rep hasn't expired, and lastHeard is within max interval btw beacons
                 if (repstate2.vid == VLRRINGVID_NULL) {     // repstate2 hasn't been added
                     repstate2.vid = repMapItr->first;
                     repstate2.sequencenumber = repMapItr->second.sequencenumber;
@@ -693,6 +707,7 @@ void Vlr::updateRepState(VlrRingVID pnei, const VlrIntRepState& pneiRepState, bo
                         repMapUpdated = true;
                     }
                 }
+                EV_WARN << "New representative heard from pnei " << pnei << ": " << pneiRepVid << endl;
             } else {    // pneiRepVid already in representativeMap
                 if (pneiRepState.sequencenumber > repMapItr->second.sequencenumber) {   // received a larger seqNo for pneiRepVid
                     repMapUpdated = true;
@@ -3610,8 +3625,8 @@ void Vlr::processTeardown(TeardownInt* msgIncoming, bool& pktForwarded)
     if (sendTestPacket && recordReceivedMsg) {   // record received message
         recordMessageRecord(/*action=*/2, /*src=*/msgIncoming->getSrc(), /*dst=*/vid, "Teardown", /*msgId=*/msgIncoming->getPathids(0), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength());  // unimportant params (msgId, hopcount)
     }
-    // bool pktForMe = false;      // set to true if this msg is directed to me or I processed it as its dst
-    // bool pktRecorded = false;      // set to true if this msg is recorded with recordMessageRecord()
+    bool pktForMe = false;      // set to true if this msg is directed to me or I processed it as its dst
+    bool pktRecorded = false;      // set to true if this msg is recorded with recordMessageRecord()
 
     if (checkOverHeardTraces)
         // see if src of msg belongs to pendingVset
@@ -3666,10 +3681,10 @@ void Vlr::processTeardown(TeardownInt* msgIncoming, bool& pktForwarded)
             if (sendTestPacket) {   // record sent message
                 recordMessageRecord(/*action=*/0, /*src=*/vid, /*dst=*/VLRRINGVID_NULL, "Teardown", /*msgId=*/0, /*hopcount=*/0, /*chunkByteLength=*/0, /*infoStr=*/"processTeardown: using temporary route but not found");   // unused params (msgId, hopcount, chunkByteLength) are just assigned to 0
                 
-                // if (recordDroppedMsg && !pktRecorded) {     // record dropped message
-                //     recordMessageRecord(/*action=*/4, /*src=*/msgIncoming->getSrc(), /*dst=*/vid, "Teardown", /*msgId=*/msgIncoming->getMessageId(), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength(), /*infoStr=*/"pathid not found");
-                //     pktRecorded = true;
-                // }
+                if (recordDroppedMsg && !pktRecorded) {     // record dropped message
+                    recordMessageRecord(/*action=*/4, /*src=*/msgIncoming->getSrc(), /*dst=*/vid, "Teardown", /*msgId=*/msgIncoming->getPathids(0), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength());
+                    pktRecorded = true;
+                }
             }
             return;
         }
@@ -3697,7 +3712,7 @@ void Vlr::processTeardown(TeardownInt* msgIncoming, bool& pktForwarded)
                 EV_INFO << "The pathid " << oldPathid << " of Teardown is found in routing table, nextHopAddr: " << nextHopVid << " (specified=" << (nextHopVid!=VLRRINGVID_NULL) << ", isUnavailable=" << (int)nextHopIsUnavailable << ")" << endl;
 
                 if (nextHopVid == VLRRINGVID_NULL) {  // I'm an endpoint of the vroute
-                    // pktForMe = true;
+                    pktForMe = true;
                     const VlrRingVID& otherEnd = (isToNexthop) ? vrouteItr->second.fromVid : vrouteItr->second.toVid;
                     bool rebuildTemp = (msgIncoming->getSrc() == otherEnd && msgIncoming->getRebuild() == false) ? false : true;    // don't rebuild route if otherEnd initiated this Teardown with rebuild=false
                     
@@ -3781,12 +3796,12 @@ void Vlr::processTeardown(TeardownInt* msgIncoming, bool& pktForwarded)
         sendCreatedTeardownToNextHop(msgIncoming, /*nextHopVid=*/mappair.first, nextHopIsUnavailable);
     }
 
-    // if (sendTestPacket && recordDroppedMsg && !pktRecorded) {   // record message
-    //     if (pktForMe)
-    //         recordMessageRecord(/*action=*/1, /*src=*/msgIncoming->getSrc(), /*dst=*/vid, "Teardown", /*msgId=*/msgIncoming->getMessageId(), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength());
-    //     else if (!pktForwarded)
-    //         recordMessageRecord(/*action=*/4, /*src=*/msgIncoming->getSrc(), /*dst=*/vid, "Teardown", /*msgId=*/msgIncoming->getMessageId(), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength());
-    // }
+    if (sendTestPacket && recordDroppedMsg && !pktRecorded) {   // record message
+        if (pktForMe)
+            recordMessageRecord(/*action=*/1, /*src=*/msgIncoming->getSrc(), /*dst=*/vid, "Teardown", /*msgId=*/msgIncoming->getPathids(0), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength());
+        else if (!pktForwarded)
+            recordMessageRecord(/*action=*/4, /*src=*/msgIncoming->getSrc(), /*dst=*/vid, "Teardown", /*msgId=*/msgIncoming->getPathids(0), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength());
+    }
 }
 
 // process Teardown for oldPathid where I'm an endpoint     NOTE not removing oldPathid from vlrRoutingTable
@@ -4307,6 +4322,7 @@ void Vlr::processTestPacket(VlrIntTestPacket *msgIncoming, bool& pktForwarded)
     }
     else {  // this TestPacket isn't destined for me
         // if (sendTestPacket && recordReceivedMsg)   // Commented out bc we're processing TestPacket, sendTestPacket must be true
+        // Commented out and only record "arrived"/"dropped" TestPacket     NOTE record "dropped" TestPacket even if recordDroppedMsg=false to check see how its hopcount
         // recordMessageRecord(/*action=*/2, /*src=*/srcVid, /*dst=*/dstVid, "TestPacket", /*msgId=*/msgIncoming->getMessageId(), /*hopcount=*/msgHopCount, /*chunkByteLength=*/msgIncoming->getByteLength());  // unimportant params (msgId, hopcount)
     
         // forward this TestPacket with findNextHop()
@@ -4315,8 +4331,8 @@ void Vlr::processTestPacket(VlrIntTestPacket *msgIncoming, bool& pktForwarded)
         if (nextHopVid == VLRRINGVID_NULL) {
             // delete vlrOptionOut;
             EV_WARN << "No next hop found for TestPacket received at me = " << vid << ", dropping packet: src = " << srcVid << ", dst = " << dstVid << ", hopCount = " << msgHopCount << endl;
-            if (sendTestPacket && recordDroppedMsg) {   // record dropped message
-                recordMessageRecord(/*action=*/4, /*src=*/srcVid, /*dst=*/vid, "TestPacket", /*msgId=*/msgIncoming->getMessageId(), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength(), /*infoStr=*/"no next hop");   // unimportant params (msgId, hopcount)
+            if (sendTestPacket /*&& recordDroppedMsg*/) {   // record dropped message
+                recordMessageRecord(/*action=*/4, /*src=*/srcVid, /*dst=*/dstVid, "TestPacket", /*msgId=*/msgIncoming->getMessageId(), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength(), /*infoStr=*/"no next hop");   // unimportant params (msgId, hopcount)
             }
             // if (displayBubbles && hasGUI())
             //     getContainingNode(host)->bubble("No next hop found for TestPacket");
@@ -4568,13 +4584,25 @@ void Vlr::processRepairLinkReqFlood(RepairLinkReqFloodInt *reqIncoming, bool& pk
         // RepairLinkReqFlood doesn't have <VlrCreationTimeTag> tag
         recordMessageRecord(/*action=*/2, /*src=*/srcVid, /*dst=*/vid, "RepairLinkReqFlood", /*msgId=*/floodSeqnum, /*hopcount=*/reqIncoming->getLinkTrace().size()+1, /*chunkByteLength=*/reqIncoming->getByteLength());  // unimportant params (msgId)
     }
+    bool pktForMe = false;      // set to true if this msg is directed to me or I processed it as its dst
+    bool pktRecorded = false;      // set to true if this msg is recorded with recordMessageRecord()
 
     if (representativeFixed && representative.heardfromvid == VLRRINGVID_NULL) {        // if I don't have a valid rep yet, I won't process or forward this message
         EV_WARN << "No valid rep heard: " << representative << ", cannot accept overlay message" << endl;
+        
+        if (sendTestPacket && recordDroppedMsg && !pktRecorded) {   // record dropped message
+            recordMessageRecord(/*action=*/4, /*src=*/srcVid, /*dst=*/vid, "RepairLinkReqFlood", /*msgId=*/floodSeqnum, /*hopcount=*/reqIncoming->getLinkTrace().size()+1, /*chunkByteLength=*/reqIncoming->getByteLength(), /*infoStr=*/"no valid rep");
+            pktRecorded = true;
+        }
         return;
     }
     if (srcVid == vid) {
         EV_INFO << "Received RepairLinkReqFlood sent by me with flood seqnum = " << floodSeqnum << ", ignoring this flood request" << endl;
+
+        if (sendTestPacket && recordDroppedMsg && !pktRecorded) {   // record dropped message
+            recordMessageRecord(/*action=*/4, /*src=*/srcVid, /*dst=*/vid, "RepairLinkReqFlood", /*msgId=*/floodSeqnum, /*hopcount=*/reqIncoming->getLinkTrace().size()+1, /*chunkByteLength=*/reqIncoming->getByteLength(), /*infoStr=*/"flood sent from me");
+            pktRecorded = true;
+        }
         return;
     }
     bool reqProcessed = false;      // if this flood request has been processed
@@ -4589,6 +4617,11 @@ void Vlr::processRepairLinkReqFlood(RepairLinkReqFloodInt *reqIncoming, bool& pk
                 reqProcessed = true;
             } else {
                 EV_INFO << "Recently received RepairLinkReqFlood with flood seqnum = " << floodSeqnum << " from src = " << srcVid << ", ignoring this flood request" << endl;
+
+                if (sendTestPacket && recordDroppedMsg && !pktRecorded) {   // record dropped message
+                    recordMessageRecord(/*action=*/4, /*src=*/srcVid, /*dst=*/vid, "RepairLinkReqFlood", /*msgId=*/floodSeqnum, /*hopcount=*/reqIncoming->getLinkTrace().size()+1, /*chunkByteLength=*/reqIncoming->getByteLength(), /*infoStr=*/"flood already received");
+                    pktRecorded = true;
+                }
                 return;
             }
         }
@@ -4603,6 +4636,7 @@ void Vlr::processRepairLinkReqFlood(RepairLinkReqFloodInt *reqIncoming, bool& pk
     }
     ASSERT(std::find(reqIncoming->getLinkTrace().begin(), reqIncoming->getLinkTrace().end(), vid) == reqIncoming->getLinkTrace().end());   // my vid shouldn't be in linkTrace bc I would remove myself from dstToPathidsMap when forwarding it for the first time
     if (dstHasMe) {
+        pktForMe = true;
         // const L3Address& srcAddr = reqIncoming->getSrcAddress();
         // std::vector<VlrPathID> brokenPathids (dstItr->second.begin(), dstItr->second.end());    // convert set of VlrPathID (dstItr->second) to vector of VlrPathID (brokenPathids)
         std::set<VlrPathID> brokenPathids;
@@ -4633,6 +4667,11 @@ void Vlr::processRepairLinkReqFlood(RepairLinkReqFloodInt *reqIncoming, bool& pk
     }
     if (reqProcessed) {
         EV_INFO << "Already processed RepairLinkReqFlood with from flood ttl = " << floodTtl << " from src = " << srcVid << ", reqProcessed=true, dropping this flood request" << endl;
+
+        if (sendTestPacket && recordDroppedMsg && !pktRecorded) {   // record dropped message
+            recordMessageRecord(/*action=*/4, /*src=*/srcVid, /*dst=*/vid, "RepairLinkReqFlood", /*msgId=*/floodSeqnum, /*hopcount=*/reqIncoming->getLinkTrace().size()+1, /*chunkByteLength=*/reqIncoming->getByteLength(), /*infoStr=*/"flood already received");
+            pktRecorded = true;
+        }
         return;
     }
     if (floodTtl <= 1) {
@@ -4674,6 +4713,12 @@ void Vlr::processRepairLinkReqFlood(RepairLinkReqFloodInt *reqIncoming, bool& pk
     //             overheardMPneis[trace[i]] = std::make_pair(prevhopVid, simTime() + neighborValidityInterval);   // initialize expireTime of overheard trace to node
     //     }
     // }
+    if (sendTestPacket && recordDroppedMsg && !pktRecorded) {   // record message
+        if (pktForMe)
+            recordMessageRecord(/*action=*/1, /*src=*/srcVid, /*dst=*/vid, "RepairLinkReqFlood", /*msgId=*/floodSeqnum, /*hopcount=*/reqIncoming->getLinkTrace().size()+1, /*chunkByteLength=*/reqIncoming->getByteLength());
+        else if (!pktForwarded)
+            recordMessageRecord(/*action=*/4, /*src=*/srcVid, /*dst=*/vid, "RepairLinkReqFlood", /*msgId=*/floodSeqnum, /*hopcount=*/reqIncoming->getLinkTrace().size()+1, /*chunkByteLength=*/reqIncoming->getByteLength());
+    }
 }
 
 // set corresponding prevhop/nexthop of each vroute in lostPneiItr->second.brokenVroutes to unavailable if setBroken=true, or available w/ temporary route if setBroken=false
@@ -5330,6 +5375,8 @@ void Vlr::processRepairRoute(RepairRouteInt *msgIncoming, bool& pktForwarded)
         // RepairRoute doesn't have <VlrCreationTimeTag> tag
         recordMessageRecord(/*action=*/2, /*src=*/msgIncoming->getSrc(), /*dst=*/vid, "RepairRoute", /*msgId=*/msgIncoming->getPathids(0), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength());  // unimportant params (msgId, hopcount)
     }
+    bool pktForMe = false;      // set to true if this msg is directed to me or I processed it as its dst
+    bool pktRecorded = false;      // set to true if this msg is recorded with recordMessageRecord()
 
     // const auto& networkHeader = getNetworkProtocolHeader(packet);
     // VlrIntOption *vlrOptionIn = const_cast<VlrIntOption *>(findVlrOptionInNetworkDatagram(networkHeader));  // may be nullptr if no VlrOption is provided in IP header, i.e. not traversing a temporary route
@@ -5369,6 +5416,11 @@ void Vlr::processRepairRoute(RepairRouteInt *msgIncoming, bool& pktForwarded)
 
             if (sendTestPacket) {   // record sent message
                 recordMessageRecord(/*action=*/0, /*src=*/vid, /*dst=*/VLRRINGVID_NULL, "Teardown", /*msgId=*/0, /*hopcount=*/0, /*chunkByteLength=*/0, /*infoStr=*/"processRepairRoute: using temporary route but not found");   // unused params (msgId, hopcount, chunkByteLength) are just assigned to 0
+
+                if (recordDroppedMsg && !pktRecorded) {     // record dropped message
+                    recordMessageRecord(/*action=*/4, /*src=*/msgIncoming->getSrc(), /*dst=*/vid, "RepairRoute", /*msgId=*/msgIncoming->getPathids(0), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength());
+                    pktRecorded = true;
+                }
             }
             return;
         }
@@ -5419,6 +5471,7 @@ void Vlr::processRepairRoute(RepairRouteInt *msgIncoming, bool& pktForwarded)
                 EV_INFO << "The pathid " << oldPathid << " of RepairRoute is found in routing table, nextHopVid: " << nextHopVid << " (specified=" << (nextHopVid!=VLRRINGVID_NULL) << ", isUnavailable=" << (int)nextHopIsUnavailable << ")" << endl;
 
                 if (nextHopVid == VLRRINGVID_NULL) {  // I'm an endpoint of the vroute
+                    pktForMe = true;
                     const VlrRingVID& otherEnd = (isToNexthop) ? vrouteItr->second.fromVid : vrouteItr->second.toVid;
                     ASSERT(vrouteItr->second.isUnavailable != 16);  // shouldn't repair a temporary route, broken temporary route is torn down directly
                     EV_DETAIL << "Handling RepairRoute for pathid = " << oldPathid << ", otherEnd = " << otherEnd << ", isVsetRoute = " << vrouteItr->second.isVsetRoute << endl;
@@ -5470,6 +5523,13 @@ void Vlr::processRepairRoute(RepairRouteInt *msgIncoming, bool& pktForwarded)
         // if (!nhResult.first.isUnspecified())
         if (resultNextHopVid != VLRRINGVID_NULL) // checked that nextHopIsUnavailable != 1
             sendCreatedRepairRoute(msgIncoming, /*nextHopPnei=*/resultNextHopVid);
+    }
+
+    if (sendTestPacket && recordDroppedMsg && !pktRecorded) {   // record message
+        if (pktForMe)
+            recordMessageRecord(/*action=*/1, /*src=*/msgIncoming->getSrc(), /*dst=*/vid, "RepairRoute", /*msgId=*/msgIncoming->getPathids(0), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength());
+        else if (!pktForwarded)
+            recordMessageRecord(/*action=*/4, /*src=*/msgIncoming->getSrc(), /*dst=*/vid, "RepairRoute", /*msgId=*/msgIncoming->getPathids(0), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength());
     }
 }
 
@@ -5527,7 +5587,7 @@ void Vlr::processNotifyVset(NotifyVsetInt *msgIncoming, bool& pktForwarded)
     EV_INFO << "Processing NotifyVset: src = " << srcVid << ", dst = " << dstVid << endl;
 
     if (sendTestPacket && recordReceivedMsg) {   // record received message
-        recordMessageRecord(/*action=*/2, /*src=*/srcVid, /*dst=*/dstVid, "NotifyVset", /*msgId=*/0, /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength());   // unimportant params (msgId, hopcount)
+        recordMessageRecord(/*action=*/2, /*src=*/srcVid, /*dst=*/dstVid, "NotifyVset", /*msgId=*/msgIncoming->getMessageId(), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength());   // unimportant params (msgId, hopcount)
     }
     bool pktForMe = false;      // set to true if this msg is directed to me or I processed it as its dst
     bool pktRecorded = false;      // set to true if this msg is recorded with recordMessageRecord()
@@ -5536,7 +5596,7 @@ void Vlr::processNotifyVset(NotifyVsetInt *msgIncoming, bool& pktForwarded)
         EV_WARN << "No valid rep heard: " << representative << ", cannot accept overlay message" << endl;
 
         if (sendTestPacket && recordDroppedMsg && !pktRecorded) {   // record dropped message
-            recordMessageRecord(/*action=*/4, /*src=*/srcVid, /*dst=*/dstVid, "NotifyVset", /*msgId=*/0, /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength(), /*infoStr=*/"no valid rep");
+            recordMessageRecord(/*action=*/4, /*src=*/srcVid, /*dst=*/dstVid, "NotifyVset", /*msgId=*/msgIncoming->getMessageId(), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength(), /*infoStr=*/"no valid rep");
             pktRecorded = true;
         }
         return;
@@ -5601,9 +5661,9 @@ void Vlr::processNotifyVset(NotifyVsetInt *msgIncoming, bool& pktForwarded)
 
     if (sendTestPacket && recordDroppedMsg && !pktRecorded) {   // record message
         if (pktForMe)
-            recordMessageRecord(/*action=*/1, /*src=*/srcVid, /*dst=*/dstVid, "NotifyVset", /*msgId=*/0, /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength());
+            recordMessageRecord(/*action=*/1, /*src=*/srcVid, /*dst=*/dstVid, "NotifyVset", /*msgId=*/msgIncoming->getMessageId(), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength());
         else if (!pktForwarded)
-            recordMessageRecord(/*action=*/4, /*src=*/srcVid, /*dst=*/dstVid, "NotifyVset", /*msgId=*/0, /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength());
+            recordMessageRecord(/*action=*/4, /*src=*/srcVid, /*dst=*/dstVid, "NotifyVset", /*msgId=*/msgIncoming->getMessageId(), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength());
     }
 }
 
@@ -5696,13 +5756,25 @@ void Vlr::processRepairLocalReqFlood(RepairLocalReqFloodInt *reqIncoming, bool& 
         // RepairLinkReqFlood doesn't have <VlrCreationTimeTag> tag
         recordMessageRecord(/*action=*/2, /*src=*/srcVid, /*dst=*/vid, "RepairLocalReqFlood", /*msgId=*/floodSeqnum, /*hopcount=*/reqIncoming->getLinkTrace().size()+1, /*chunkByteLength=*/reqIncoming->getByteLength());  // unimportant params (msgId)
     }
+    bool pktForMe = false;      // set to true if this msg is directed to me or I processed it as its dst
+    bool pktRecorded = false;      // set to true if this msg is recorded with recordMessageRecord()
 
     if (representativeFixed && representative.heardfromvid == VLRRINGVID_NULL) {        // if I don't have a valid rep yet, I won't process or forward this message
         EV_WARN << "No valid rep heard: " << representative << ", cannot accept overlay message" << endl;
+        
+        if (sendTestPacket && recordDroppedMsg && !pktRecorded) {   // record dropped message
+            recordMessageRecord(/*action=*/4, /*src=*/srcVid, /*dst=*/vid, "RepairLocalReqFlood", /*msgId=*/floodSeqnum, /*hopcount=*/reqIncoming->getLinkTrace().size()+1, /*chunkByteLength=*/reqIncoming->getByteLength(), /*infoStr=*/"no valid rep");  // unimportant params (msgId)
+            pktRecorded = true;
+        }
         return;
     }
     if (srcVid == vid) {
         EV_INFO << "Received RepairLocalReqFlood sent by me with flood seqnum = " << floodSeqnum << ", ignoring this flood request" << endl;
+
+        if (sendTestPacket && recordDroppedMsg && !pktRecorded) {   // record dropped message
+            recordMessageRecord(/*action=*/4, /*src=*/srcVid, /*dst=*/vid, "RepairLocalReqFlood", /*msgId=*/floodSeqnum, /*hopcount=*/reqIncoming->getLinkTrace().size()+1, /*chunkByteLength=*/reqIncoming->getByteLength(), /*infoStr=*/"flood sent from me");  // unimportant params (msgId)
+            pktRecorded = true;
+        }
         return;
     }
     auto dstItr = dstToPathidsMap.find(vid);
@@ -5730,6 +5802,11 @@ void Vlr::processRepairLocalReqFlood(RepairLocalReqFloodInt *reqIncoming, bool& 
     // recentFloodItr->second.second = simTime() + recentReqFloodExpiration;
     if (std::find(reqIncoming->getLinkTrace().begin(), reqIncoming->getLinkTrace().end(), vid) != reqIncoming->getLinkTrace().end()) {   // my vid found in linkTrace
         EV_INFO << "Received RepairLocalReqFlood whose linkTrace = " << reqIncoming->getLinkTrace() << " already contains me=" << vid << ", ignoring this flood request" << endl;
+
+        if (sendTestPacket && recordDroppedMsg && !pktRecorded) {   // record dropped message
+            recordMessageRecord(/*action=*/4, /*src=*/srcVid, /*dst=*/vid, "RepairLocalReqFlood", /*msgId=*/floodSeqnum, /*hopcount=*/reqIncoming->getLinkTrace().size()+1, /*chunkByteLength=*/reqIncoming->getByteLength(), /*infoStr=*/"flood already forwarded");
+            pktRecorded = true;
+        }
         return;
     }
     // check if I've received linkTrace for brokenPathids in this repairLocalReq
@@ -5747,6 +5824,7 @@ void Vlr::processRepairLocalReqFlood(RepairLocalReqFloodInt *reqIncoming, bool& 
     recentLocalReqItr->second.first.insert(forwardBrokenPathids.begin(), forwardBrokenPathids.end());
 
     if (dstHasMe) {
+        pktForMe = true;
         // const L3Address& srcAddr = reqIncoming->getSrcAddress();
         // get pathids in dstItr->second that also exist in forwardBrokenPathids (newly received from srcVid)
         std::vector<VlrPathID> brokenPathidsForMe;
@@ -5852,6 +5930,13 @@ void Vlr::processRepairLocalReqFlood(RepairLocalReqFloodInt *reqIncoming, bool& 
     //             overheardMPneis[trace[i]] = std::make_pair(prevhopVid, simTime() + neighborValidityInterval);   // initialize expireTime of overheard trace to node
     //     }
     // }
+
+    if (sendTestPacket && recordDroppedMsg && !pktRecorded) {   // record message
+        if (pktForMe)
+            recordMessageRecord(/*action=*/1, /*src=*/srcVid, /*dst=*/vid, "RepairLocalReqFlood", /*msgId=*/floodSeqnum, /*hopcount=*/reqIncoming->getLinkTrace().size()+1, /*chunkByteLength=*/reqIncoming->getByteLength());
+        else if (!pktForwarded)
+            recordMessageRecord(/*action=*/4, /*src=*/srcVid, /*dst=*/vid, "RepairLocalReqFlood", /*msgId=*/floodSeqnum, /*hopcount=*/reqIncoming->getLinkTrace().size()+1, /*chunkByteLength=*/reqIncoming->getByteLength());
+    }
 }
 
 // process all RepairLocalReqInfo in delayedRepairLocalReq after new breakage detected
@@ -6352,6 +6437,8 @@ void Vlr::processRepairLocalPrev(RepairLocalPrevInt *msgIncoming, bool& pktForwa
         // RepairRoute doesn't have <VlrCreationTimeTag> tag
         recordMessageRecord(/*action=*/2, /*src=*/msgIncoming->getSrc(), /*dst=*/vid, "RepairLocalPrev", /*msgId=*/pathidToPrevhopMap.begin()->first, /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength());  // unimportant params (msgId, hopcount)
     }
+    bool pktForMe = false;      // set to true if this msg is directed to me or I processed it as its dst
+    bool pktRecorded = false;      // set to true if this msg is recorded with recordMessageRecord()
 
     // const auto& networkHeader = getNetworkProtocolHeader(packet);
     // VlrIntOption *vlrOptionIn = const_cast<VlrIntOption *>(findVlrOptionInNetworkDatagram(networkHeader));  // may be nullptr if no VlrOption is provided in IP header, i.e. not traversing a temporary route
@@ -6391,6 +6478,11 @@ void Vlr::processRepairLocalPrev(RepairLocalPrevInt *msgIncoming, bool& pktForwa
 
             if (sendTestPacket) {   // record sent message
                 recordMessageRecord(/*action=*/0, /*src=*/vid, /*dst=*/VLRRINGVID_NULL, "Teardown", /*msgId=*/0, /*hopcount=*/0, /*chunkByteLength=*/0, /*infoStr=*/"processRepairLocalPrev: using temporary route but not found");   // unused params (msgId, hopcount, chunkByteLength) are just assigned to 0
+
+                if (recordDroppedMsg && !pktRecorded) {     // record dropped message
+                    recordMessageRecord(/*action=*/4, /*src=*/msgIncoming->getSrc(), /*dst=*/vid, "RepairLocalPrev", /*msgId=*/pathidToPrevhopMap.begin()->first, /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength());  // unimportant params (msgId, hopcount)
+                    pktRecorded = true;
+                }
             }
             return;
         }
@@ -6462,7 +6554,8 @@ void Vlr::processRepairLocalPrev(RepairLocalPrevInt *msgIncoming, bool& pktForwa
                         ASSERT(!routePrevhopVids.empty());  // I have at least a prevhop bc prevhop forwarded this repairLocalPrev to me
                         setRoutePrevhopVidsInRepairLocalPrevToForward(routePrevInMap, routePrevhopVids);    // copy prevhopVids at me, but limit total size to routePrevhopVidsSize
                     }
-                }
+                } else    // RepairLocalPrev doesn't need to be forwarded to next hop
+                    pktForMe = true;
             }
         }
     }
@@ -6481,6 +6574,13 @@ void Vlr::processRepairLocalPrev(RepairLocalPrevInt *msgIncoming, bool& pktForwa
         if (resultNextHopVid != VLRRINGVID_NULL)
             sendCreatedRepairLocalPrev(msgIncoming, /*nextHopPnei=*/resultNextHopVid, /*computeChunkLength=*/true);
         
+    }
+
+    if (sendTestPacket && recordDroppedMsg && !pktRecorded) {   // record message
+        if (pktForMe)
+            recordMessageRecord(/*action=*/1, /*src=*/msgIncoming->getSrc(), /*dst=*/vid, "RepairLocalPrev", /*msgId=*/pathidToPrevhopMap.begin()->first, /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength());  // unimportant params (msgId, hopcount)
+        else if (!pktForwarded)
+            recordMessageRecord(/*action=*/4, /*src=*/msgIncoming->getSrc(), /*dst=*/vid, "RepairLocalPrev", /*msgId=*/pathidToPrevhopMap.begin()->first, /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength());  // unimportant params (msgId, hopcount)
     }
 }
 
@@ -7449,7 +7549,8 @@ VlrRingVID Vlr::findNextHop(VlrIntOption& vlrOption, VlrRingVID prevHopVid, VlrR
         // if (repResult.first == VLRRINGVID_NULL), then repResult.second = VLRRINGVID_MAX, if this node has any available pnei, minDistance < VLRRINGVID_MAX, won't be using rep-path
         if (std::get<0>(repResult) == dstVid) { // if excludeVid == dstVid, this can't happen
             nexthopVid = std::get<2>(repResult);
-            EV_INFO << "Destination vid = " << dstVid << " found in representativeMap, setting nexthop to rep parent = " << nexthopVid << endl;
+            // auto repMapItr = representativeMap.find(dstVid);
+            // EV_WARN << "Destination found in representativeMap, dstVid=" << dstVid << ", rep inNetwork=" << repMapItr->second.inNetwork << ", lastHeard=" << repMapItr->second.lastHeard << ", setting nexthop to rep parent = " << nexthopVid << endl;
             vlrOption.setCurrentPathid(VLRPATHID_REPPATH);
             vlrOption.setTowardVid(dstVid);
             vlrOption.setTempPathid(VLRPATHID_INVALID);

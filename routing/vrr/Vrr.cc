@@ -185,26 +185,32 @@ void Vrr::processMessage(cMessage *message)
         } else
             EV_WARN << "Received packet from failed link, me=" << vid << ", selfNodeFailure=" << selfNodeFailure << ", ignoring packet " << message->getName() << endl;
     } else {
+        bool processPkt = true;
         if (auto unicastPacket = dynamic_cast<VlrIntUniPacket *>(message)) {
             VlrRingVID msgPrevHopVid = unicastPacket->getVlrOption().getPrevHopVid();
             if (msgPrevHopVid != VLRRINGVID_NULL)
                 psetTable.setRecvNeiGateIndex(msgPrevHopVid, pktGateIndex);
-        }  
+        } else if (simulateBeaconLostRate > 0 && uniform(0, 1) < simulateBeaconLostRate) {  // broadcast message
+            EV_WARN << "Received broadcast packet and simulating packet loss due to collision, me=" << vid << ", ignoring packet " << message->getName() << endl;
+            processPkt = false;
+        }
 
-        if (auto beacon = dynamic_cast<VlrIntBeacon *>(message))
-            processBeacon(beacon, pktForwarded);
-        else if (auto setupReq = dynamic_cast<SetupReqInt *>(message))
-            processSetupReq(setupReq, pktForwarded);
-        else if (auto setupReply = dynamic_cast<SetupReplyInt *>(message))
-            processSetupReply(setupReply, pktForwarded);
-        else if (auto setupFail = dynamic_cast<SetupFailInt *>(message))
-            processSetupFail(setupFail, pktForwarded);
-        else if (auto teardown = dynamic_cast<TeardownInt *>(message))
-            processTeardown(teardown, pktForwarded);
-        else if (auto testpacket = dynamic_cast<VlrIntTestPacket *>(message))
-            processTestPacket(testpacket, pktForwarded);
-        else if (auto repairLocalReply = dynamic_cast<RepairLocalReplyInt *>(message))
-            processRepairLocalReply(repairLocalReply, pktForwarded);
+        if (processPkt) {
+            if (auto beacon = dynamic_cast<VlrIntBeacon *>(message))
+                processBeacon(beacon, pktForwarded);
+            else if (auto setupReq = dynamic_cast<SetupReqInt *>(message))
+                processSetupReq(setupReq, pktForwarded);
+            else if (auto setupReply = dynamic_cast<SetupReplyInt *>(message))
+                processSetupReply(setupReply, pktForwarded);
+            else if (auto setupFail = dynamic_cast<SetupFailInt *>(message))
+                processSetupFail(setupFail, pktForwarded);
+            else if (auto teardown = dynamic_cast<TeardownInt *>(message))
+                processTeardown(teardown, pktForwarded);
+            else if (auto testpacket = dynamic_cast<VlrIntTestPacket *>(message))
+                processTestPacket(testpacket, pktForwarded);
+            else if (auto repairLocalReply = dynamic_cast<RepairLocalReplyInt *>(message))
+                processRepairLocalReply(repairLocalReply, pktForwarded);
+        }
     }
 
     if (!pktForwarded)
@@ -758,7 +764,7 @@ void Vrr::updateRepState(VlrRingVID pnei, const VlrIntRepState& pneiRepState, bo
                 auto addResult = shouldAddVnei(pneiRepVid);
                 bool& shouldAdd = std::get<0>(addResult);  // access first element in tuple
                 if (shouldAdd)
-                    pendingVsetAdd(pneiRepVid, /*numTrials=*/1);
+                    pendingVsetAdd(pneiRepVid, /*numTrials=*/1, /*heardRep=*/true);
             }
 
             EV_INFO << "Representative heard from pnei " << pnei << ": " << pneiRepVid << endl;
@@ -1091,7 +1097,8 @@ VlrRingVID Vrr::getProxyForSetupReq(bool checkInNetwork/*=true*/) const
 }
 
 // numTrials: [1, setupReqRetryLimit]
-bool Vrr::pendingVsetAdd(VlrRingVID node, int numTrials)
+// if heardRep=true, this node is a representative I just heard from beacon, I can send setupReply to it instead of setupReq
+bool Vrr::pendingVsetAdd(VlrRingVID node, int numTrials, bool heardRep/*=false*/)
 {
     bool addedNode = false;
     if (node != vid && vset.find(node) == vset.end()) {  // node not myself and not a vnei in vset
@@ -1105,7 +1112,7 @@ bool Vrr::pendingVsetAdd(VlrRingVID node, int numTrials)
             setupReqTimer = new WaitSetupReqIntTimer(strcat(timerName, std::to_string(node).c_str()));
             setupReqTimer->setDst(node);
             // setupReqTimer->setTimerType(0);
-            // setupReqTimer->setRepairRoute(false);
+            setupReqTimer->setRepairRoute(heardRep);   // NOTE using setupReqTimer.repairRoute as heardRep
             // setupReqTimer->setAlterPendingVnei(VLRRINGVID_NULL);
             setupReqTimer->setReqVnei(true);
             setupReqTimer->setRetryCount(setupReqRetryLimit - numTrials);
@@ -1113,11 +1120,14 @@ bool Vrr::pendingVsetAdd(VlrRingVID node, int numTrials)
             double delay = 0 /*uniform(0, 0.1) * routeSetupReqWaitTime*/;  // add random delay for setupReq(reqVnei=false) to avoid sending multiple setupReq at same time when tryNonEssRoute becomes true
             scheduleAt(simTime() + delay, setupReqTimer);   // schedule setupReq to node now
         } else if (pendingItr->second != nullptr) {    // node already in pendingVset
+            if (heardRep)   // only change heardRep from false to true
+                pendingItr->second->setRepairRoute(heardRep);   // NOTE using setupReqTimer.repairRoute as heardRep
+
             int expectedRetryCount = setupReqRetryLimit - numTrials;
             if (pendingItr->second->getRetryCount() > expectedRetryCount)
                 pendingItr->second->setRetryCount(expectedRetryCount);
             if (pendingItr->second->getRetryCount() < setupReqRetryLimit) {     // reschedule setupReq timer to node if it's not coming soon
-                double maxDelayToNextTimer = beaconInterval;    // 1 or beaconInterval
+                double maxDelayToNextTimer = 0.1;    // 1 or beaconInterval
                 if (pendingItr->second->isScheduled() && pendingItr->second->getArrivalTime() - simTime() >= maxDelayToNextTimer) {    // only reschedule fillVsetTimer if it won't come within maxDelayToNextTimer
                     cancelEvent(pendingItr->second);
                     scheduleAt(simTime() + uniform(0, maxDelayToNextTimer), pendingItr->second);   // schedule setupReq to node now
@@ -1178,6 +1188,7 @@ void Vrr::processWaitSetupReqTimer(WaitSetupReqIntTimer *setupReqTimer)
     VlrRingVID targetVid = setupReqTimer->getDst();
     int retryCount = setupReqTimer->getRetryCount();
     // bool repairRoute = setupReqTimer->getRepairRoute();     // setupReq should be sent with repairRoute=true and traceVec to record trace toward dst
+    bool heardRep = setupReqTimer->getRepairRoute();        // NOTE using setupReqTimer.repairRoute as heardRep
     // // bool allowSetupReqTrace = setupReqTimer->getAllowSetupReqTrace();     // setupReqTrace should be sent if setupReqRetryLimit has been reached
     // bool reqVnei = setupReqTimer->getReqVnei();     // setupReq should be sent with reqVnei=true and traceVec to record trace toward dst
     // char timerType = setupReqTimer->getTimerType();     // 0: pendingVset[dst], 1: vset[dst]
@@ -1200,7 +1211,7 @@ void Vrr::processWaitSetupReqTimer(WaitSetupReqIntTimer *setupReqTimer)
         simtime_t expiredLastheard = simTime() - repSeqValidityInterval;
 
         auto repMapItr = representativeMap.find(targetVid);
-        if (selfInNetwork && repMapItr != representativeMap.end() && repMapItr->second.heardfromvid != VLRRINGVID_NULL && repMapItr->second.lastHeard > expiredLastheard) {
+        if (selfInNetwork && heardRep && repMapItr != representativeMap.end() && repMapItr->second.heardfromvid != VLRRINGVID_NULL && repMapItr->second.lastHeard > expiredLastheard) {
             VlrRingVID newnode = targetVid;
             // ensure it's possible for me send SetupReply to rep via rep path
             VlrIntOption vlrOptionOut;
@@ -1636,13 +1647,14 @@ void Vrr::recordNewVnei(const VlrRingVID& newVnei)
     if (sendTestPacket) { // write node status update
         if (vset.size() >= 2 * vsetHalfCardinality) {  // vset is full
             std::ostringstream s;
-            s << "vsetFull: inNetwork=" << selfInNetwork << " vset=" << printVsetToString();
+            s << "vsetFull: inNetwork=" << selfInNetwork << " newVnei=" << newVnei << " vset=" << printVsetToString();
             recordNodeStatsRecord(/*infoStr=*/s.str().c_str());   // unused params (stage)
-            
             if (convertVsetToSet() == vidRingRegVset) {
                 std::ostringstream s;
-                s << "vsetCorrect: inNetwork=" << selfInNetwork << " vset=" << printVsetToString();
+                s << "vsetCorrect: inNetwork=" << selfInNetwork << " newVnei=" << newVnei << " vset=" << printVsetToString();
                 recordNodeStatsRecord(/*infoStr=*/s.str().c_str());
+
+                nodesVsetCorrect.insert(vid);
             }
         }
     }
@@ -2009,6 +2021,8 @@ void Vrr::processTeardown(TeardownInt* msgIncoming, bool& pktForwarded)
     if (sendTestPacket && recordReceivedMsg) {   // record received message
         recordMessageRecord(/*action=*/2, /*src=*/msgIncoming->getSrc(), /*dst=*/vid, "Teardown", /*msgId=*/msgIncoming->getPathids(0), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength());  // unimportant params (msgId, hopcount)
     }
+    bool pktForMe = false;      // set to true if this msg is directed to me or I processed it as its dst
+    bool pktRecorded = false;      // set to true if this msg is recorded with recordMessageRecord()
 
     // for (size_t k = 0; k < numOfPathids; ++k) {
     const VlrPathID& oldPathid = msgIncoming->getPathids(0);
@@ -2030,6 +2044,7 @@ void Vrr::processTeardown(TeardownInt* msgIncoming, bool& pktForwarded)
             EV_INFO << "The pathid " << oldPathid << " of Teardown is found in routing table, nextHopAddr: " << nextHopVid << " (specified=" << (nextHopVid!=VLRRINGVID_NULL) << endl;
 
             if (nextHopVid == VLRRINGVID_NULL) {  // I'm an endpoint of the vroute
+                pktForMe = true;
                 const VlrRingVID& otherEnd = (isToNexthop) ? vrouteItr->second.fromVid : vrouteItr->second.toVid;
                 // bool rebuildTemp = (msgIncoming->getSrc() == otherEnd && msgIncoming->getRebuild() == false) ? false : true;    // don't rebuild route if otherEnd initiated this Teardown with rebuild=false
                 
@@ -2048,6 +2063,12 @@ void Vrr::processTeardown(TeardownInt* msgIncoming, bool& pktForwarded)
                 vlrRoutingTable.removeRouteByPathID(oldPathid);
             }
         }
+    }
+    if (sendTestPacket && recordDroppedMsg && !pktRecorded) {   // record message
+        if (pktForMe)
+            recordMessageRecord(/*action=*/1, /*src=*/msgIncoming->getSrc(), /*dst=*/vid, "Teardown", /*msgId=*/msgIncoming->getPathids(0), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength());
+        else if (!pktForwarded)
+            recordMessageRecord(/*action=*/4, /*src=*/msgIncoming->getSrc(), /*dst=*/vid, "Teardown", /*msgId=*/msgIncoming->getPathids(0), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength());
     }
 }
 
@@ -2088,6 +2109,8 @@ bool Vrr::removeEndpointOnTeardown(const VlrPathID& pathid, const VlrRingVID& to
 
                 removedFromVset = vsetEraseAddPending(towardVid, /*addToPending=*/addToPending);  // if true, towardVid was removed from vset and added to pendingVset
 
+                nodesVsetCorrect.erase(vid);
+
                 if (vset.empty()) {     // if vset empty after removing towardVid
                     selfInNetwork = false;
                     cancelEvent(inNetworkWarmupTimer);
@@ -2101,7 +2124,7 @@ bool Vrr::removeEndpointOnTeardown(const VlrPathID& pathid, const VlrRingVID& to
                 }
                 if (sendTestPacket) { // write node status update
                     std::ostringstream s;
-                    s << "vsetUnfull: inNetwork=" << selfInNetwork << " vset=" << printVsetToString() << " vsetSize=" << vset.size();
+                    s << "vsetUnfull: inNetwork=" << selfInNetwork << " removedVnei=" << towardVid << " vset=" << printVsetToString() << " vsetSize=" << vset.size();
                     recordNodeStatsRecord(/*infoStr=*/s.str().c_str());   // unused params (stage)
                 }
                 
@@ -2291,11 +2314,12 @@ void Vrr::processTestPacket(VlrIntTestPacket *msgIncoming, bool& pktForwarded)
     }
     else {  // this TestPacket isn't destined for me
         // if (sendTestPacket && recordReceivedMsg)   // Commented out bc we're processing TestPacket, sendTestPacket must be true
+        // Commented out and only record "arrived"/"dropped" TestPacket     NOTE record "dropped" TestPacket even if recordDroppedMsg=false to check see how its hopcount
         // recordMessageRecord(/*action=*/2, /*src=*/srcVid, /*dst=*/dstVid, "TestPacket", /*msgId=*/msgIncoming->getMessageId(), /*hopcount=*/msgHopCount, /*chunkByteLength=*/msgIncoming->getByteLength());  // unimportant params (msgId, hopcount)
 
         if (checkUniPacketHopcountLimit && msgIncoming->getHopcount()+1 >= uniPacketHopcountLimit) {    // packet reached max hopcount
-            if (sendTestPacket && recordDroppedMsg) {   // record dropped message
-                recordMessageRecord(/*action=*/4, /*src=*/srcVid, /*dst=*/vid, "TestPacket", /*msgId=*/msgIncoming->getMessageId(), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength(), /*infoStr=*/"hopcount limit reached");   // unimportant params (msgId, hopcount)
+            if (sendTestPacket /*&& recordDroppedMsg*/) {   // record dropped message
+                recordMessageRecord(/*action=*/4, /*src=*/srcVid, /*dst=*/dstVid, "TestPacket", /*msgId=*/msgIncoming->getMessageId(), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength(), /*infoStr=*/"hopcount limit reached");   // unimportant params (msgId, hopcount)
             }
             return;
         } else {
@@ -2305,8 +2329,8 @@ void Vrr::processTestPacket(VlrIntTestPacket *msgIncoming, bool& pktForwarded)
             if (nextHopVid == VLRRINGVID_NULL) {
                 // delete vlrOptionOut;
                 EV_WARN << "No next hop found for TestPacket received at me = " << vid << ", dropping packet: src = " << srcVid << ", dst = " << dstVid << ", hopCount = " << msgHopCount << endl;
-                if (sendTestPacket && recordDroppedMsg) {   // record dropped message
-                    recordMessageRecord(/*action=*/4, /*src=*/srcVid, /*dst=*/vid, "TestPacket", /*msgId=*/msgIncoming->getMessageId(), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength(), /*infoStr=*/"no next hop");   // unimportant params (msgId, hopcount)
+                if (sendTestPacket /*&& recordDroppedMsg*/) {   // record dropped message
+                    recordMessageRecord(/*action=*/4, /*src=*/srcVid, /*dst=*/dstVid, "TestPacket", /*msgId=*/msgIncoming->getMessageId(), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength(), /*infoStr=*/"no next hop");   // unimportant params (msgId, hopcount)
                 }
             } else {    // nexthop found to forward TestPacket
                 // auto msgOutgoing = staticPtrCast<VlrIntTestPacket>(msgIncoming->dupShared());

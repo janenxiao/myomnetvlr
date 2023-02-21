@@ -2,10 +2,12 @@ import networkx as nx
 import matplotlib.pyplot as plt
 # from sortedcontainers import SortedDict, SortedList, SortedSet
 from random import sample, randrange, choice
+from bisect import bisect_left, bisect_right
 import numpy as np
 import pandas
 
 from networkx.readwrite import json_graph
+from networkx.algorithms import community
 import pickle
 import csv
 import json
@@ -33,10 +35,16 @@ def getNeiIndicesInVectorWrapAround(index, numNeis, vecSize):
         numNeis -= 1
     return neiIndices
 
-def processResultNodeFile(nodefileToRead, edgelistFile, gpickleFile, numvroutesFile, vroutepathsFile, constructtimeFile, constructlogFile):
+def processResultNodeFile(nodefileToRead, edgelistFile, gpickleFile, PGmapTimes, numvroutesFile, vroutepathsFile, constructtimeFile, constructlogFile):
+    PGmap = dict()      # {time in PGmapTimes: PG at time}
+    writeNodeStatsTime = None   # last "nodeStats" time processed, correspond to PGtime = largest PGmapTimes[i] < writeNodeStatsTime, recorded node pset in PGmap[PGtime]
     PG = nx.Graph()     # only 1 edge is allowed btw a pair of nodes
     # nodePositions = dict()  # {vid: xy coordinates}
+
     vsetHalfCardinality = None
+    nodesVsetFull = set()  # nodes that have recorded "vsetFull"
+    nodesVsetCorrect = set()  # nodes that have recorded "vsetCorrect"
+    nodesFailed = set()     # nodes that have recorded "beforeNodeFailure"
 
     startrow = 0
     endrow = 0
@@ -45,20 +53,20 @@ def processResultNodeFile(nodefileToRead, edgelistFile, gpickleFile, numvroutesF
     with open(numvroutesFile, 'w', newline='') as csvfile1:
         csvwriter_numvroutes = csv.writer(csvfile1)
         if startrow <= 0:
-            csvwriter_numvroutes.writerow(["node", "numRoutes"])
+            csvwriter_numvroutes.writerow(["time", "node", "numRoutes"])
 
         with open(vroutepathsFile, 'w', newline='') as csvfile2:
             csvwriter_vroutepaths = csv.writer(csvfile2)
             if startrow <= 0:
-                csvwriter_vroutepaths.writerow(["src", "dst", "physical path length"])
+                csvwriter_vroutepaths.writerow(["time", "src", "dst", "physical path length"])
 
             with open(constructtimeFile, 'w', newline='') as csvfile3:
                 csvwriter_constructtime = csv.writer(csvfile3)
                 if startrow <= 0:
-                    csvwriter_constructtime.writerow(["time", "node", "status", "numNodesVsetFull"])
+                    csvwriter_constructtime.writerow(["time", "node", "status", "numNodesVsetFull",  "numNodesVsetCorrect"])
         
                 # constructtime = ''  # time when last "vsetFull" is recorded
-                nodesVsetFull = set()  # nodes that have recorded "vsetFull"
+                
                 # row format: node vid, time, "nodeStats", xy coordinates, L3Address, linkedPneis, inNetwork, hasRoot, vset, routes to me in vlrRoutingTable, linkedPneis size, vset size, pendingVset size, number of vroutes in vlrRoutingTable
                 with open(nodefileToRead, newline='') as csvfileToRead:
                     spamreader = csv.reader(csvfileToRead)
@@ -77,130 +85,160 @@ def processResultNodeFile(nodefileToRead, edgelistFile, gpickleFile, numvroutesF
                             timeStr = row[1]
                             infoStr = row[2]
                             if infoStr == "nodeStats":
-                                stageStr = row[14]
-                                if stageStr == "finish":
-                                    simPosition = eval(row[3])
-                                    linkedPneiStr = row[5][1:-1].strip()    # strip() removes the leading and trailing whitespaces
-                                    vsetStr = row[8][1:-1].strip()
-                                    hasRoot = bool(int(row[7]))
-                                    vroutesToMeStr = row[9][1:-1].strip()
-                                    numRoutes = int(row[13])
-                                    PG.add_node(node)
-                                    PG.nodes[node]['simPosition'] = simPosition
-                                    # nodePositions[node] = simPosition
+                                # create PG at PGtime corresponding to writeNodeStatsTime
+                                if writeNodeStatsTime is None or writeNodeStatsTime < float(timeStr):
+                                    PG = nx.Graph()
+                                    writeNodeStatsTime = float(timeStr)
+                                    PGtimeindex = bisect_left(PGmapTimes, writeNodeStatsTime)   # find largest PGmapTimes[i] < writeNodeStatsTime, PGmapTimes should start with 0 so there's always PGmapTimes[i] < writeNodeStatsTime
+                                    assert PGtimeindex > 0, f"bisect_left(PGmapTimes, writeNodeStatsTime={writeNodeStatsTime}) returns {PGtimeindex} <= 0"
+                                    PGtime = PGmapTimes[PGtimeindex-1]
+                                    print(f"PGmap[{PGtime}] created at writeNodeStatsTime={writeNodeStatsTime}")
+                                    PGmap[PGtime] = PG
 
-                                    if hasRoot:     # if node doesn't have root, it shouldn't have any vroutes in vlrRoutingTable
+                                # stageStr = row[14]
+                                # if stageStr == "finish":
+                                linkedPneiStr = row[3][1:-1].strip()    # strip() removes the leading and trailing whitespaces
+                                selfInNetwork = bool(row[4])
+                                smallestRep = int(row[5])
+                                vsetStr = row[6][1:-1].strip()
+                                vsetCorrectStr = row[7][1:-1].strip()
+                                vroutesToMeStr = row[8][1:-1].strip()
+                                numPneis = int(row[9])
+                                vsetSize = int(row[10])
+                                pendingVsetSize = int(row[11])
+                                numRoutes = int(row[12])
+                                numBeaconSent = int(row[13])
+                                PG.add_node(node)
+                                # PG.nodes[node]['simPosition'] = simPosition
+                                # nodePositions[node] = simPosition
 
-                                        PG.nodes[node]['vset'] = {int(s) for s in re.findall(r'\d+', vsetStr)}  # parse numbers in vsetStr and store as attribute "vset"
-                                        vsetHalfCard = int(len(PG.nodes[node]['vset']) / 2)
-                                        if vsetHalfCardinality is None or vsetHalfCardinality < vsetHalfCard:   # vsetHalfCardinality = max vset size / 2
-                                            vsetHalfCardinality = vsetHalfCard
-                                        
-                                        if linkedPneiStr:
-                                            for pneiStr in linkedPneiStr.split(' '):
-                                                pnei = int(pneiStr)
-                                                PG.add_edge(node, pnei)
-                                                # print("add_edge: ", node, pnei)
-                                        if vroutesToMeStr:
-                                            for vrouteStr in vroutesToMeStr.split(' '):
-                                                vrouteItems = vrouteStr.split(':')
-                                                csvwriter_vroutepaths.writerow(vrouteItems)
-                                        
-                                        csvwriter_numvroutes.writerow([node, numRoutes])
+                                # if hasRoot:     # if node doesn't have root, it shouldn't have any vroutes in vlrRoutingTable
+
+                                PG.nodes[node]['vset'] = {int(s) for s in re.findall(r'\d+', vsetStr)}  # parse numbers in vsetStr and store as attribute "vset"
+                                vsetHalfCard = int(len(PG.nodes[node]['vset']) / 2)
+                                if vsetHalfCardinality is None or vsetHalfCardinality < vsetHalfCard:   # vsetHalfCardinality = max vset size / 2
+                                    vsetHalfCardinality = vsetHalfCard
+                                
+                                if linkedPneiStr:
+                                    for pneiStr in linkedPneiStr.split(' '):
+                                        pnei = int(pneiStr)
+                                        PG.add_edge(node, pnei)
+                                        # print("add_edge: ", node, pnei)
+                                if vroutesToMeStr:
+                                    for vrouteStr in vroutesToMeStr.split(' '):
+                                        vrouteItems = vrouteStr.split(':')
+                                        vrouteItems.insert(0, timeStr)  # insert time at first item in vrouteItems
+                                        csvwriter_vroutepaths.writerow(vrouteItems)
+                                
+                                csvwriter_numvroutes.writerow([timeStr, node, numRoutes])
                             
                             elif infoStr.startswith('vsetFull'):
                                 nodesVsetFull.add(node)
-                                csvwriter_constructtime.writerow([timeStr, node, "vsetFull", len(nodesVsetFull)])
+                                csvwriter_constructtime.writerow([timeStr, node, "vsetFull", len(nodesVsetFull), len(nodesVsetCorrect)])
+
+                            elif infoStr.startswith('vsetCorrect'):
+                                nodesVsetCorrect.add(node)
+                                csvwriter_constructtime.writerow([timeStr, node, "vsetCorrect", len(nodesVsetFull), len(nodesVsetCorrect)])
                             
-                            elif infoStr.startswith('vsetUnfull') or infoStr.startswith('rootLost') or infoStr.find('NodeFailure') != -1:
+                            elif infoStr.startswith('vsetUnfull'):
                                 nodesVsetFull.discard(node)     # remove(node) throws KeyError exception if node isn't found in set, while discard(node) doesn't
-                                if infoStr.startswith('vsetUnfull'):
-                                    vsetStatus = 'vsetUnfull'
-                                elif infoStr.startswith('rootLost'):
-                                    vsetStatus = 'rootLost'
-                                else:
-                                    vsetStatus = 'NodeFailure'
-                                csvwriter_constructtime.writerow([timeStr, node, vsetStatus, len(nodesVsetFull)])
+                                nodesVsetCorrect.discard(node)
+                                csvwriter_constructtime.writerow([timeStr, node, "vsetUnfull", len(nodesVsetFull), len(nodesVsetCorrect)])
+
+                            elif infoStr.find('beforeNodeFailure') != -1:
+                                nodesVsetFull.discard(node)     # remove(node) throws KeyError exception if node isn't found in set, while discard(node) doesn't
+                                nodesVsetCorrect.discard(node)
+                                nodesFailed.add(node)
+                                csvwriter_constructtime.writerow([timeStr, node, "NodeFailure", len(nodesVsetFull), len(nodesVsetCorrect)])
+
 
     with open(constructlogFile, 'w') as filewrite_constructlog:
             
         print("vsetHalfCardinality:", vsetHalfCardinality)
         filewrite_constructlog.write(f"vsetHalfCardinality: {vsetHalfCardinality}\n")
 
-        largest_connected_component = max(nx.connected_components(PG), key=len) # set of nodes in the largest connected component in PG
-        nodesVsetNotFull = largest_connected_component.difference(nodesVsetFull)    # nodesVsetNotFull: nodes in largest_connected_component (should be in overlay) but not in nodesVsetFull
-        if not nodesVsetNotFull:    # nodesVsetNotFull is empty
-            print(f"All nodes in largest_connected_component vsetFull")
-            print(f"largest_connected_component size: {len(largest_connected_component)}")
-            filewrite_constructlog.write("All nodes in largest_connected_component vsetFull\n")
-            filewrite_constructlog.write(f"largest_connected_component size: {len(largest_connected_component)}\n")
-        else:
-            print(f"Error! nodes not vsetFull: {nodesVsetNotFull}")
-            print(f"nodesVsetFull: {nodesVsetFull}")
-            filewrite_constructlog.write(f"Error! nodes not vsetFull: {nodesVsetNotFull}\n")
-            filewrite_constructlog.write(f"nodesVsetFull: {nodesVsetFull}\n")
+        # largest_connected_component = max(nx.connected_components(PG), key=len) # set of nodes in the largest connected component in PG
+        # nodesVsetNotFull = largest_connected_component.difference(nodesVsetFull)    # nodesVsetNotFull: nodes in largest_connected_component (should be in overlay) but not in nodesVsetFull
+        # if not nodesVsetNotFull:    # nodesVsetNotFull is empty
+        #     print(f"All nodes in largest_connected_component vsetFull")
+        #     print(f"largest_connected_component size: {len(largest_connected_component)}")
+        #     filewrite_constructlog.write("All nodes in largest_connected_component vsetFull\n")
+        #     filewrite_constructlog.write(f"largest_connected_component size: {len(largest_connected_component)}\n")
+        # else:
+        #     print(f"Error! nodes not vsetFull: {nodesVsetNotFull}")
+        #     print(f"nodesVsetFull: {nodesVsetFull}")
+        #     filewrite_constructlog.write(f"Error! nodes not vsetFull: {nodesVsetNotFull}\n")
+        #     filewrite_constructlog.write(f"nodesVsetFull: {nodesVsetFull}\n")
 
-        # verify each node has correct vset
-        numConnectedCorrect = 0     # number of nodes in largest_connected_component with correct vset
-        connected_node_vec = sorted(largest_connected_component)
-        nodeToIndex = dict()    # map node id to its index in connected_node_vec
-        for i in range(len(connected_node_vec)):
-            nodeToIndex[connected_node_vec[i]] = i
-        for node in connected_node_vec:
-            vsetCorrect = {connected_node_vec[neiIndex] for neiIndex in getNeiIndicesInVectorWrapAround(nodeToIndex[node], vsetHalfCardinality, len(connected_node_vec))}
-            if PG.nodes[node]['vset'] != vsetCorrect:
-                print(f"Error! node {node} correct vset: {vsetCorrect}, actual vset: {PG.nodes[node]['vset']}")
-                filewrite_constructlog.write(f"Error! node {node} correct vset: {vsetCorrect}, actual vset: {PG.nodes[node]['vset']}\n")
-            else:
-                numConnectedCorrect += 1
+        # # verify each node has correct vset
+        # numConnectedCorrect = 0     # number of nodes in largest_connected_component with correct vset
+        # connected_node_vec = sorted(largest_connected_component)
+        # nodeToIndex = dict()    # map node id to its index in connected_node_vec
+        # for i in range(len(connected_node_vec)):
+        #     nodeToIndex[connected_node_vec[i]] = i
+        # for node in connected_node_vec:
+        #     vsetCorrect = {connected_node_vec[neiIndex] for neiIndex in getNeiIndicesInVectorWrapAround(nodeToIndex[node], vsetHalfCardinality, len(connected_node_vec))}
+        #     if PG.nodes[node]['vset'] != vsetCorrect:
+        #         print(f"Error! node {node} correct vset: {vsetCorrect}, actual vset: {PG.nodes[node]['vset']}")
+        #         filewrite_constructlog.write(f"Error! node {node} correct vset: {vsetCorrect}, actual vset: {PG.nodes[node]['vset']}\n")
+        #     else:
+        #         numConnectedCorrect += 1
             
-        print(f"Number of nodes with correct vset: {numConnectedCorrect}, expected number: {len(largest_connected_component)}")
-        filewrite_constructlog.write(f"Number of nodes with correct vset: {numConnectedCorrect}, expected number: {len(largest_connected_component)}\n")
-               
+        # print(f"Number of nodes with correct vset: {numConnectedCorrect}, expected number: {len(largest_connected_component)}")
+        # filewrite_constructlog.write(f"Number of nodes with correct vset: {numConnectedCorrect}, expected number: {len(largest_connected_component)}\n")
 
-    # # print(list(PG.edges))
-    # print(PG.degree[0])
-    # print(PG.nodes(data=True))
-    # # nx.draw(PG, with_labels=True)
-    # nx.draw(PG, with_labels=True, pos=nodePositions)
-    # print(nx.info(PG))
-    # plt.show()
+        print(f"Number of nodes with full vset: {len(nodesVsetFull)}, number of nodes with correct vset: {len(nodesVsetCorrect)}, number of failed nodes: {len(nodesFailed)}")
+        filewrite_constructlog.write(f"Number of nodes with full vset: {len(nodesVsetFull)}, number of nodes with correct vset: {len(nodesVsetCorrect)}, number of failed nodes: {len(nodesFailed)}\n")
+    
+    PGtimeindex = 0
+    for PGtime, PG in PGmap.items():
+        PGtimeindex += 1
+        print(f"PGtime: {PGtime}")
+        # # print(list(PG.edges))
+        # print(PG.degree[0])
+        # print(PG.nodes(data=True))
+        nx.draw(PG, with_labels=True)
+        # nx.draw(PG, with_labels=True, pos=nodePositions)
+        print(nx.info(PG))
+        plt.show()
 
-    if edgelistFile is not None and type(edgelistFile) == str:
-        # check if this file is overwriting an existing file
-        if exists(edgelistFile) and input(f"Are you sure to overwrite the existing file {edgelistFile}? Enter Y to continue") != 'Y':
-            print(f"Didn't write edgelist to file {edgelistFile}")
-        else:
-            with open(edgelistFile, 'wb') as fh:    # need to have the directory created
-                nx.write_edgelist(PG, fh, delimiter=',', data=False)
+        if PGtimeindex > 1 and PGtimeindex < len(PGmap):    # exclude first and last item in PGmap
+        # if edgelistFile is not None and type(edgelistFile) == str:
+        #     # check if this file is overwriting an existing file
+        #     if exists(edgelistFile) and input(f"Are you sure to overwrite the existing file {edgelistFile}? Enter Y to continue") != 'Y':
+        #         print(f"Didn't write edgelist to file {edgelistFile}")
+        #     else:
+        #         with open(edgelistFile, 'wb') as fh:    # need to have the directory created
+        #             nx.write_edgelist(PG, fh, delimiter=',', data=False)
             # write NetworkX graphs as Python pickle
             if gpickleFile is not None and type(gpickleFile) == str:
-                nx.write_gpickle(PG, gpickleFile)
+                gpickleFilename = f"{gpickleFile[:-8]}_time{PGtime}.gpickle"
+                nx.write_gpickle(PG, gpickleFilename)
         
-        # graph data in node-link format that is suitable for JSON serialization
-        # with open(edgelistFile, 'w') as fh:
-        #     node_link_data = json_graph.node_link_data(PG)
-        #     print(node_link_data)
-        #     json.dump(node_link_data, fh, indent=4) # position tuple will be converted to list
-        # with open(edgelistFile, 'r') as fh:
-        #     data = json.load(fh)
-        #     print(data)
-        #     H = json_graph.node_link_graph(data)
-        #     print(H.nodes(data=True))
-        #     nx.draw(H, with_labels=True)
-        #     plt.show()
+            # graph data in node-link format that is suitable for JSON serialization
+            # with open(edgelistFile, 'w') as fh:
+            #     node_link_data = json_graph.node_link_data(PG)
+            #     print(node_link_data)
+            #     json.dump(node_link_data, fh, indent=4) # position tuple will be converted to list
+            # with open(edgelistFile, 'r') as fh:
+            #     data = json.load(fh)
+            #     print(data)
+            #     H = json_graph.node_link_graph(data)
+            #     print(H.nodes(data=True))
+            #     nx.draw(H, with_labels=True)
+            #     plt.show()
 
-    return PG
+    return PGmap
 
 def writeMsgIdMapToDeliveryFile(msgIdSent, testdeliveryFile, maxDeliveryTime, currTime):
-    # msgIdSent - {(src, msgId): [sendTime, dst, (deliveredTime, hopcount)]}
+    # msgIdSent - {(src, msgId): [sendTime, dst, shortestLength, (deliveredTime, hopcount)]}
     # if currTime is None, write every item in msgIdSent to testdeliveryFile
     with open(testdeliveryFile, 'a', newline='') as csvfile2:
         csvwriter_testdelivery = csv.writer(csvfile2)
         
         for srcIdTuple in list(msgIdSent.keys()):
             msgInfoList = msgIdSent[srcIdTuple]
-            if len(msgInfoList) == 4:    # msg sent and arrived, msgInfoList: [sendTime, dst, deliveredTime, hopcount]
+            if len(msgInfoList) == 5:    # msg sent and arrived, msgInfoList: [sendTime, dst, shortestLength, deliveredTime, hopcount]
                 msgInfoList[1:1] = [srcIdTuple[0]]    # insert src after sendTime   NOTE right hand side must be an iterable of size at least 1
                 csvwriter_testdelivery.writerow(msgInfoList)
                 del msgIdSent[srcIdTuple]
@@ -213,7 +251,7 @@ def writeMsgIdMapToDeliveryFile(msgIdSent, testdeliveryFile, maxDeliveryTime, cu
                 break
 
 
-def processResultTestFile(testfileToRead, testpathsFile, PG, testdeliveryFile, maxDeliveryTime, vlrpacketsFile, testpathsStartTime=0):
+def processResultTestFile(testfileToRead, testpathsFile, PGmap, testdeliveryFile, maxDeliveryTime, vlrpacketsFile, testpathsStartTime=0):
     # maxDeliveryTime - packet sent in msgIdSent that doesn't get a reply in sendTime + maxDeliveryTime will be considered failed
     # testpathsStartTime - only record TestPacket arrived after testpathsStartTime in testpathsFile, usually some recovery time after failure, or 0 if no failure
     sumStretch = 0
@@ -222,22 +260,27 @@ def processResultTestFile(testfileToRead, testpathsFile, PG, testdeliveryFile, m
     startrow = 0
     endrow = 0
 
-    msgIdSent = dict()  # {(src, msgId): [sendTime, dst, deliveredTime, hopcount]} for recording delivery of TestPacket
+    msgIdSent = dict()  # {(src, msgId): [sendTime, dst, shortest path length, deliveredTime, hopcount]} for recording delivery of TestPacket
     nextCheckDeliveryTime = 0
 
     # testSrcDstArrived = dict()  # {src: {set of dst to which TestPacket from src has arrived}}
+    PGmapTimes = list(PGmap.keys())
+    PGtimeindex = 0
+    PGtime = PGmapTimes[0]     # get first key (time) in PGmap  # for row with timeStr, calculate shortestPath based on PGmap[PGtime], where PGtime = largest time in PGmap <= timeStr
+    PG = PGmap[PGtime]
+    nextPGtime = None if len(PGmapTimes) <= PGtimeindex+1 else PGmapTimes[PGtimeindex+1]
 
     with open(testpathsFile, 'w', newline='') as csvfile:
         csvwriter_testpaths = csv.writer(csvfile)
         if startrow <= 0:
-            csvwriter_testpaths.writerow(["src", "dst", "physical path length", "shortest path length", "stretch"])
-        largest_connected_component = max(nx.connected_components(PG), key=len) # set of nodes in the largest connected component in PG
+            csvwriter_testpaths.writerow(["src", "dst", "physical path length", "shortest path length", "stretch", "deliveredTime"])
+        # largest_connected_component = max(nx.connected_components(PG), key=len) # set of nodes in the largest connected component in PG
 
         # NOTE only write a header row and close the file to open file properly in writeMsgIdMapToDeliveryFile()
         with open(testdeliveryFile, 'w', newline='') as csvfile2:
             csvwriter_testdelivery = csv.writer(csvfile2)
             if startrow <= 0:
-                csvwriter_testdelivery.writerow(["sendTime", "src", "dst", "deliveredTime", "physical path length"])
+                csvwriter_testdelivery.writerow(["sendTime", "src", "dst", "shortest path length", "deliveredTime", "physical path length"])
 
         with open(vlrpacketsFile, 'w', newline='') as csvfile4:
             csvwriter_vlrpackets = csv.writer(csvfile4)
@@ -252,7 +295,7 @@ def processResultTestFile(testfileToRead, testpathsFile, PG, testdeliveryFile, m
                 spamreader = csv.reader(csvfileToRead)
                 # next(spamreader)    # skip header row
                 i = 0
-                # row format: node, src, messageId at src, dst, time, msgType, "sent/arrived/received", hopcount, byte length
+                # row format: node, src, messageId at src, dst, time, msgType, "sent/arrived/received/dropped", hopcount, byte length
                 for row in spamreader:
                     if i < startrow:    # line x (x starts at 1) in nodefileToRead corresponds to i=x-1
                         i += 1
@@ -272,42 +315,68 @@ def processResultTestFile(testfileToRead, testpathsFile, PG, testdeliveryFile, m
                     timeStr = row[4]
                     msgType = row[5]
                     msgState = row[6]
+
+                    recordInVlrpacketsFile = False
+
                     if msgType == "TestPacket":
-                        if msgState == "arrived":
+                        msgTime = float(timeStr)
+
+                        # only record packet in testdeliveryFile if src and dst are connected based on PG
+                        if nextPGtime is not None and msgTime >= nextPGtime:
+                            PGtime = nextPGtime
+                            PGtimeindex += 1
+                            PG = PGmap[PGtime]
+                            nextPGtime = None if len(PGmapTimes) <= PGtimeindex+1 else PGmapTimes[PGtimeindex+1]
+                            print(f"PGmap[{PGtime}] used for current row timeStr={timeStr}, nextPGtime={nextPGtime}")
+
+                        if msgState == "sent":
+                            shortestLength = None
+                            # if src in largest_connected_component and dst in largest_connected_component:
+                            try:
+                                shortestPath = nx.shortest_path(PG, src, dst)   # throws networkx.exception.NetworkXNoPath if no path btw src and dst, i.e. not in the same connected component
+                                shortestLength = len(shortestPath)
+                             # else:   # src or dst not in largest_connected_component of PG
+                            except Exception as e:
+                                print(f"Error calculating shortest path: src={src}, dst={dst}, msgType={msgType}, msgState={msgState}: {e}")
+                            
+                            if shortestLength is not None:      # path exists btw src and dst
+                                msgIdSent[(src, msgId)] = [timeStr, dst, shortestLength]
+                                # if msgTime > 1019:
+                                #     print(f"msgIdSent[{(src, msgId)}] = {msgIdSent[(src, msgId)]}")
+                        
+                        elif msgState == "arrived":
                             physicalLength = int(row[7])
 
-                            msgTime = float(timeStr)
+                            if msgTime > testpathsStartTime:                                
+                                # only record "arrived" packet in testpathsFile if "sent" was recorded for the packet in testdeliveryFile, i.e., stretch of packets that arrive after maxDeliveryTime may not be recorded
+                                if (src, msgId) in msgIdSent:
+                                    msgIdSent[(src, msgId)].extend([timeStr, physicalLength])
 
-                            if msgTime > testpathsStartTime:
-                                if src in largest_connected_component and dst in largest_connected_component:
-                                    shortestPath = nx.shortest_path(PG, src, dst)   # throws networkx.exception.NetworkXNoPath if no path btw src and dst, i.e. not in the same connected component
-                                    shortestLength = len(shortestPath)
+                                    shortestLength = msgIdSent[(src, msgId)][2]     # msgIdSent[(src, msgId)]: [sendTime, dst, shortest path length, deliveredTime, hopcount]
                                     
                                     stretch = physicalLength / shortestLength
                                     sumStretch += stretch
                                     numStretch += 1
 
-                                    csvwriter_testpaths.writerow([src, dst, physicalLength, shortestLength, stretch])  # <src>,<dst>,<physical path length>,<shortest path length>,<stretch>
+                                    csvwriter_testpaths.writerow([src, dst, physicalLength, shortestLength, stretch, timeStr])  # <src>,<dst>,<physical path length>,<shortest path length>,<stretch>,<deliveredTime>
+
+                                else:
+                                    pass
                                 
-                                else:   # src or dst not in largest_connected_component of PG
-                                    print(f"Error: vroute endpoint src={src} connected={(src in largest_connected_component)}, dst={dst} connected={(dst in largest_connected_component)}")
-
                             # testSrcDstArrived.setdefault(src, set()).add(dst)   # add dst to testSrcDstArrived[src] which is a set
-
-                            if (src, msgId) in msgIdSent:
-                                msgIdSent[(src, msgId)].extend([timeStr, physicalLength])
 
                             if msgTime > nextCheckDeliveryTime:
                                 writeMsgIdMapToDeliveryFile(msgIdSent, testdeliveryFile, maxDeliveryTime, msgTime)
                                 nextCheckDeliveryTime = msgTime + maxDeliveryTime
-                        
-                        elif msgState == "sent":
-                            msgIdSent[(src, msgId)] = [timeStr, dst]
-                            # if msgTime > 1019:
-                            #     print(f"msgIdSent[{(src, msgId)}] = {msgIdSent[(src, msgId)]}")
+
+                        elif msgState == "dropped":
+                            recordInVlrpacketsFile = True
 
                     # msg is a control packet
                     else:
+                        recordInVlrpacketsFile = True
+
+                    if recordInVlrpacketsFile:
                         infoStr = row[9] if len(row) > 9 else ""
                         hopcount = None if msgState == "sent" else int(row[7])
                         if hopcount == 0:
@@ -315,7 +384,12 @@ def processResultTestFile(testfileToRead, testpathsFile, PG, testdeliveryFile, m
                         chunkByteLength = None if msgState == "sent" else int(row[8])
                         if chunkByteLength == 0:
                             chunkByteLength = None
-                        dst = node if msgState == "received" else dst   # record receiving node as dst for "received" control packets
+                        if src == 65535:    # VLRRINGVID_NULL
+                            src = None
+                        if dst == 65535:    # VLRRINGVID_NULL
+                            dst = None
+                        # NOTE for "dropped" packets, dropping node may be incorrectly recorded as the lost pnei of the actual dropping node, bc in simulation we let lost pnei record dropped msg and notify node of node/link failure
+                        dst = node if msgState == "received" or msgState == "dropped" else dst   # record receiving node as dst for "received/dropped" packets
                         csvwriter_vlrpackets.writerow([timeStr, src, dst, msgType, msgState, hopcount, chunkByteLength, infoStr])
                         
     
@@ -349,7 +423,7 @@ def getDeliveryFileFromResultTestFile(testfileToRead, testdeliveryFile, maxDeliv
         spamreader = csv.reader(csvfileToRead)
         # next(spamreader)    # skip header row
         i = 0
-        # row format: src, messageId at src, dst, time, msgType, "sent/arrived/received", hopcount, byte length
+        # row format: src, messageId at src, dst, time, msgType, "sent/arrived/received/dropped", hopcount, byte length
         for row in spamreader:
             i += 1
             if i % 10000 == 0:
@@ -385,25 +459,32 @@ def getDeliveryFileFromResultTestFile(testfileToRead, testdeliveryFile, maxDeliv
         writeMsgIdMapToDeliveryFile(msgIdSent, testdeliveryFile, maxDeliveryTime, currTime=None)
 
 
-def calcVrouteStretchWithPG(vroutefileToRead, vroutepathsFile, PG):
+def calcVrouteStretchWithPG(vroutefileToRead, vroutepathsFile, PGmap):
     sumStretch = 0
     numStretch = 0
 
     startrow = 0
     endrow = 0
 
-    largest_connected_component = max(nx.connected_components(PG), key=len) # set of nodes in the largest connected component in PG
+    # largest_connected_component = max(nx.connected_components(PG), key=len) # set of nodes in the largest connected component in PG
+    PGmapTimes = list(PGmap.keys())
+    PGtimeindex = 0
+    PGtime = PGmapTimes[0]     # get first key (time) in PGmap  # for row with timeStr, calculate shortestPath based on PGmap[PGtime], where PGtime = largest time in PGmap <= timeStr
+    PG = PGmap[PGtime]
+    nextPGtime = None   
+    if len(PGmapTimes) > 1:
+        nextPGtime = PGmapTimes[1]
 
     with open(vroutepathsFile, 'w', newline='') as csvfile:
         csvwriter = csv.writer(csvfile)
         if startrow <= 0:
-            csvwriter.writerow(["src", "dst", "physical path length", "shortest path length", "stretch"])
+            csvwriter.writerow(["time", "src", "dst", "physical path length", "shortest path length", "stretch"])
         
         with open(vroutefileToRead, newline='') as csvfileToRead:
             spamreader = csv.reader(csvfileToRead)
             next(spamreader)    # skip header row
             i = 0
-            # row format: src, messageId at src, dst, time, msgType, "sent/arrived/received", hopcount, byte length
+            # row format: time, src, dst, hopcount
             for row in spamreader:
                 if i < startrow:    # line x (x starts at 1) in nodefileToRead corresponds to i=x-1
                     i += 1
@@ -416,12 +497,20 @@ def calcVrouteStretchWithPG(vroutefileToRead, vroutepathsFile, PG):
                         csvfile.flush()
                         # print(f"i: {i}")
                 
-                src = int(row[0])
-                dst = int(row[1])
-                physicalLength = int(row[2])
+                timeStr = row[0]
+                src = int(row[1])
+                dst = int(row[2])
+                physicalLength = int(row[3])
 
-                if src in largest_connected_component and dst in largest_connected_component:
+                if nextPGtime is not None and float(timeStr) >= nextPGtime:
+                    PGtime = nextPGtime
+                    PGtimeindex += 1
+                    PG = PGmap[PGtime]
+                    nextPGtime = None if len(PGmapTimes) <= PGtimeindex+1 else PGmapTimes[PGtimeindex+1]
+                    print(f"PGmap[{PGtime}] used for current row timeStr={timeStr}, nextPGtime={nextPGtime}")
 
+                # if src in largest_connected_component and dst in largest_connected_component:
+                try:
                     shortestPath = nx.shortest_path(PG, src, dst)
                     shortestLength = len(shortestPath)
                     
@@ -429,10 +518,11 @@ def calcVrouteStretchWithPG(vroutefileToRead, vroutepathsFile, PG):
                     sumStretch += stretch
                     numStretch += 1
 
-                    csvwriter.writerow([src, dst, physicalLength, shortestLength, stretch])  # <src>,<dst>,<physical path length>,<shortest path length>,<stretch>
+                    csvwriter.writerow([timeStr, src, dst, physicalLength, shortestLength, stretch])  # <src>,<dst>,<physical path length>,<shortest path length>,<stretch>
                 
-                else:   # src or dst not in largest_connected_component of PG
-                    print(f"Error: vroute endpoint src={src} connected={(src in largest_connected_component)}, dst={dst} connected={(dst in largest_connected_component)}")
+                # else:   # src or dst not in largest_connected_component of PG
+                except Exception as e:
+                    print(f"Error calculating stretch: src={src}, dst={dst}, physicalLength={physicalLength}: {e}")
 
 
     print(f"final i: {i}")
@@ -567,10 +657,10 @@ def genGraphEdgelistFile(graphType, filepath, numCols, numNodes):
         # plt.show()
 
     elif graphType == "powerlaw2":
-        # G = nx.powerlaw_cluster_graph(numNodes, 2, 0.5)
+        G = nx.powerlaw_cluster_graph(numNodes, 2, 0.5)
         # read graph from existing file
-        edgelistFileToRead = f"{filepath}edgelist_{graphType}-{numNodes}-nonConsec.csv"
-        G = nx.read_edgelist(edgelistFileToRead, delimiter=',', nodetype=int)  # physical graph
+        # edgelistFileToRead = f"{filepath}edgelist_{graphType}-{numNodes}-nonConsec.csv"
+        # G = nx.read_edgelist(edgelistFileToRead, delimiter=',', nodetype=int)  # physical graph
 
         labelMapping = dict(zip(G.nodes, labelList))
         G = nx.relabel_nodes(G, labelMapping, copy=True)   # copy=False
@@ -643,160 +733,291 @@ def readGraphpickle(graphType, filepath, numCols, numNodes):
             for tup in labelPosTuples:
                 file.write(f"{tup[0]}\n")
 
+# selectColIndex in range [1, 4]
+def getRepNodeSetFromRepIdPosFile(graphType, filepath, numNodes, selectColIndex):
+    resultNodes = set()
+
+    repIdPosFile = f"{filepath}repPosNodeId_{graphType}_{numNodes}.csv"
+    with open(repIdPosFile, newline='') as csvfileToRead:
+        spamreader = csv.reader(csvfileToRead)
+        # next(spamreader)    # skip header row
+        # row format: "nodeAtCorner/nodeAtEdgece/nodeAtCorn25/nodeAtCentre", node id, node id, node id, node id
+        for row in spamreader:
+            resultNodes.add(int(row[selectColIndex]))
+    
+    return resultNodes
  
 
-def genFailureScenarioFileFromVid(graphType, filepath, numNodes, failureType, repType, repCase, nofailNodes):
+def genFailureScenarioFileFromVid(graphType, filepath, numCols, numNodes, failureType):
     # labelList = []
     # with open(vidAssignmentFile, newline='') as fileToRead:
     #     # row format: vid
     #     for row in fileToRead:
     #         labelList.append(int(row))
+    repPosColIndex = 0
+    failureCase = f"case{repPosColIndex}"
+    if graphType == "squareGrid":
+        nofailNodes = getRepNodeSetFromRepIdPosFile(graphType, filepath, numNodes, selectColIndex=repPosColIndex+1)
+    else:
+        nofailNodes = set()
+    nofailNodes.add(0)      # never let node 0 fail
+    print("failureCase: ", failureCase)
+    print("nofailNodes: ", nofailNodes)
 
+    vidAssignmentFile = f"{filepath}vidlist_{graphType}_{numNodes}_maxId60000.csv"
     gpickleFile = f"{filepath}PGpickle_{graphType}_{numNodes}.gpickle"
     G = nx.read_gpickle(gpickleFile)
 
-    # if failureType.startswith("nodeFailure"):
-    #     pattern = r"nodeFailure(\d+)pc(-\w+)?"  # matches "nodeFailure10pc" or "nodeFailure10pc-hinumvr"
-    #     regexmatch = re.fullmatch(pattern, failureType)
+    if failureType.startswith("nodeFailure"):
+        pattern = r"nodeFailure(\d+)pc(-\w+)?"  # matches "nodeFailure10pc" or "nodeFailure10pc-hinumvr"
+        regexmatch = re.fullmatch(pattern, failureType)
 
-    #     assert regexmatch, f"Error: unrecognized failureType: {failureType}"
-    #     failurePercent = int(regexmatch.group(1)) / 100     # if failureType="nodeFailure10pc", failurePercent = 0.1
-    #     print(f"node failure percentage: {failurePercent}")
-    #     if regexmatch.group(2):     # if suffix "-hinumvr" exists
-    #         failureSuffix = regexmatch.group(2)[1:]
-    #         print(f"failure suffix: {failureSuffix}")
+        assert regexmatch, f"Error: unrecognized failureType: {failureType}"
+        failurePercent = int(regexmatch.group(1)) / 100     # if failureType="nodeFailure10pc", failurePercent = 0.1
+        print(f"node failure percentage: {failurePercent}")
+        if regexmatch.group(2):     # if suffix "-hinumvr" exists
+            failureSuffix = regexmatch.group(2)[1:]
+            print(f"failure suffix: {failureSuffix}")
 
-    #     GnodeCanfailSet = set(G.nodes).difference(nofailNodes)
-    #     numfailNodes = int(round(G.number_of_nodes() * failurePercent))
-    #     print("GnodeCanfailSet.size: ", len(GnodeCanfailSet))
-    #     print("numfailNodes: ", numfailNodes)
+        GnodeCanfailSet = set(G.nodes).difference(nofailNodes)
+        numfailNodes = int(round(G.number_of_nodes() * failurePercent))
+        print("GnodeCanfailSet.size: ", len(GnodeCanfailSet))
+        print("numfailNodes: ", numfailNodes)
 
-    #     if failureSuffix == "hinumvr":
-    #         numvroutesfilepath_ = f"results/nofailure-version0/vsetHalfCard2-1/{repType}/{repCase}/"
-    #         numvroutesfilename = f"{numvroutesfilepath_}numvroutes_squareGrid_{len(labelMapping)}.csv"
-    #         df_numRoutes = pandas.read_csv(numvroutesfilename, usecols=["node", "numRoutes"])
-    #         df_numRoutes = df_numRoutes[df_numRoutes["node"].isin(GnodeCanfailSet)]
-    #         df_numRoutes.sort_values(by=['numRoutes'], ignore_index=True, inplace=True)
-    #         # fix number of different weights
-    #         numWeights = 100  # number of different weights
-    #         # groupSize = int(len(df_numRoutes.index) / numWeights)   # number of rows with the same weight
-    #         # df_numRoutes["numRank"] = df_numRoutes.index / groupSize
-    #         # df_numRoutes["numRank"] = df_numRoutes["numRank"].apply(np.floor).apply(lambda x: x+1 if x < numWeights else x )
-    #         # df_numRoutes["numRank"] = df_numRoutes["numRank"]
-    #         # weight increases by 1 for each unique "numRoutes" value
-    #         df_numRoutes["numRank"] = df_numRoutes["numRoutes"].rank(method='dense')    # rank always increases by 1 between groups with increasing "numRoutes"
-    #         print(df_numRoutes)
-    #         #         node  numRoutes  numRank
-    #         # 0         0          6      1.0
-    #         # 1     19721          6      1.0
-    #         # 2      9320          8      2.0
-    #         print("df_numRoutes.quantile", df_numRoutes.quantile([0.1, 0.25, 0.5, 0.75, 0.9]))
-    #         # df_selected = df_numRoutes.sample(n=numfailNodes, weights=df_numRoutes["numRank"])
-    #         # print(df_selected)
-    #         # print(df_selected.quantile([0.1, 0.25, 0.5, 0.75, 0.9]))
+        # if failureSuffix == "hinumvr":
+        #     numvroutesfilepath_ = f"results/nofailure-version0/vsetHalfCard2-1/{repType}/{repCase}/"
+        #     numvroutesfilename = f"{numvroutesfilepath_}numvroutes_squareGrid_{len(labelMapping)}.csv"
+        #     df_numRoutes = pandas.read_csv(numvroutesfilename, usecols=["node", "numRoutes"])
+        #     df_numRoutes = df_numRoutes[df_numRoutes["node"].isin(GnodeCanfailSet)]
+        #     df_numRoutes.sort_values(by=['numRoutes'], ignore_index=True, inplace=True)
+        #     # fix number of different weights
+        #     numWeights = 100  # number of different weights
+        #     # groupSize = int(len(df_numRoutes.index) / numWeights)   # number of rows with the same weight
+        #     # df_numRoutes["numRank"] = df_numRoutes.index / groupSize
+        #     # df_numRoutes["numRank"] = df_numRoutes["numRank"].apply(np.floor).apply(lambda x: x+1 if x < numWeights else x )
+        #     # df_numRoutes["numRank"] = df_numRoutes["numRank"]
+        #     # weight increases by 1 for each unique "numRoutes" value
+        #     df_numRoutes["numRank"] = df_numRoutes["numRoutes"].rank(method='dense')    # rank always increases by 1 between groups with increasing "numRoutes"
+        #     print(df_numRoutes)
+        #     #         node  numRoutes  numRank
+        #     # 0         0          6      1.0
+        #     # 1     19721          6      1.0
+        #     # 2      9320          8      2.0
+        #     print("df_numRoutes.quantile", df_numRoutes.quantile([0.1, 0.25, 0.5, 0.75, 0.9]))
+        #     # df_selected = df_numRoutes.sample(n=numfailNodes, weights=df_numRoutes["numRank"])
+        #     # print(df_selected)
+        #     # print(df_selected.quantile([0.1, 0.25, 0.5, 0.75, 0.9]))
 
-    #     GisConnected = False
-    #     while not GisConnected:
-    #         if failureSuffix == "hinumvr":
-    #             df_selected = df_numRoutes.sample(n=numfailNodes, weights=df_numRoutes["numRank"])
-    #             # print(df_selected)
-    #             print("df_selected.quantile", df_selected.quantile([0.1, 0.25, 0.5, 0.75, 0.9]))
-    #             failNodeList = df_selected["node"].tolist()
-    #         else:
-    #             failNodeList = sample(list(GnodeCanfailSet), numfailNodes)
-            
-    #         G_copy = G.copy()
-    #         for failNode in failNodeList:
-    #             G_copy.remove_node(failNode)
-    #         if nx.is_connected(G_copy):
-    #             GisConnected = True
-    #         else:
-    #             print(f"Graph G w/o failNodeList={failNodeList} is not connected, try again")
-
-    #     degree_series = pandas.Series(data=[degree for node, degree in G_copy.degree()])
-    #     print("G degree value_counts: \n", degree_series.value_counts(normalize=True))
-        
-    #     nodePositions = nx.get_node_attributes(G_copy, 'position')
-    #     # nx.draw(G_copy, with_labels=True, pos=nodePositions)     # node_size: default=300
-    #     nx.draw(G_copy, with_labels=False, node_size=30, pos=nodePositions)     # draw node as small dot
-    #     # print(nx.info(G_copy))
-    #     plt.show()
-
-    #     filepath = f"{filepath}{failureType}/{repType}/{repCase}/"
-    #     with open(f"{filepath}failureNode_squareGrid_{len(labelMapping)}.csv", 'w') as file:
-    #         for failNode in failNodeList:
-    #             file.write(f"{failNode},{labelToIndex[failNode]}\n")
-    #     xl = 0
-    #     xr = numCols
-    #     yl = 0
-    #     yr = numCols
-    #     xl = 0 if (xl < 0) else (numCols - 1) if (xl > numCols - 1) else xl
-    #     xr = 0 if (xr < 0) else (numCols - 1) if (xr > numCols - 1) else xr
-    #     yl = 0 if (yl < 0) else (numCols - 1) if (yl > numCols - 1) else yl
-    #     yr = 0 if (yr < 0) else (numCols - 1) if (yr > numCols - 1) else yr
-    #     with open(f"{filepath}printGrid_{len(labelMapping)}_{xl}-{xr}--{yl}-{yr}.csv", 'w') as file:
-    #         rowstr = f"{' ': <3}\t\t"   # variable:{fill character}{align left< or right> or center^}{width}    print 3 whitespaces b4 \t\t
-    #         for x in range(xl, xr+1):
-    #             rowstr += f"{x:5d}\t"
-    #         rowstr += "\n"
-    #         file.write(rowstr)
-
-    #         for y in range(yl, yr+1):
-    #             rowstr = f"{y:3d}\t\t"  # specify width to be 3, padded with spaces
-    #             for x in range(xl, xr+1):
-    #                 if labelMapping[(x,y)] not in failNodeList:
-    #                     rowstr += f"{labelMapping[(x,y)]:5d}\t"  # specify width to be 5, padded with spaces
-    #                 else:
-    #                     rowstr += f"{' ': <5}\t"   # variable:{fill character}{align left< or right> or center^}{width}    print ' ' with total width = 5, fill w/ whitespaces, b4 \t
-    #             rowstr += "\n"
-    #             file.write(rowstr)
-
-
-    # elif failureType.startswith("linkFailure"):
-    #     pattern = r"linkFailure(\d+)pc"
-    #     regexmatch = re.fullmatch(pattern, failureType)
-
-    #     assert regexmatch, f"Error: unrecognized failureType: {failureType}"
-    #     failurePercent = int(regexmatch.group(1)) / 100     # if failureType="nodeFailure10pc", failurePercent = 0.1
-    #     print(f"link failure percentage: {failurePercent}")
-
-    #     numfailLinks = int(round(G.number_of_edges() * failurePercent))
-    #     print("numfailLinks: ", numfailLinks)
-    #     GisConnected = False
-    #     while not GisConnected:
-    #         failLinkList = sample(list(G.edges), numfailLinks)
-    #         G_copy = G.copy()
-    #         for failLink in failLinkList:
-    #             G_copy.remove_edge(failLink[0], failLink[1])
-    #         if nx.is_connected(G_copy):
-    #             GisConnected = True
-    #         else:
-    #             print(f"Graph G w/o failLinkList={failLinkList} is not connected, try again")
+        numfailedNodes = 0
+        failNodeList = list()
+        G_copy = G.copy()
+        while (numfailedNodes < numfailNodes):
+            GisConnected = False
+            while not GisConnected:
+                # if failureSuffix == "hinumvr":
+                #     df_selected = df_numRoutes.sample(n=numfailNodes, weights=df_numRoutes["numRank"])
+                #     # print(df_selected)
+                #     print("df_selected.quantile", df_selected.quantile([0.1, 0.25, 0.5, 0.75, 0.9]))
+                #     failNodeList = df_selected["node"].tolist()
+                # else:
+                # failNodeList = sample(list(GnodeCanfailSet), numfailNodes)
+                failNode = choice(list(GnodeCanfailSet))     # fail one node at a time
+                failNodeEdges = list(G_copy.edges(failNode))
                 
-    #     degree_series = pandas.Series(data=[degree for node, degree in G_copy.degree()])
-    #     print("G degree value_counts: \n", degree_series.value_counts(normalize=True))
+                # for failNode in failNodeList:
+                G_copy.remove_node(failNode)
+                if nx.is_connected(G_copy):
+                    GisConnected = True
+                    numfailedNodes += 1
+                    failNodeList.append(failNode)
+                    GnodeCanfailSet.remove(failNode)
+                    # print(f"Graph G removed failNode={failNode}, numfailedNodes={numfailedNodes}")
+                else:
+                    for failLink in failNodeEdges:
+                        G_copy.add_edge(failLink[0], failLink[1])
+                    # print(f"Graph G w/o failNodeList={failNodeList} is not connected, try again")
+                    print(f"Graph G with numfailedNodes={numfailedNodes} w/o failNode={failNode} is not connected, try again")
+                
+        degree_series = pandas.Series(data=[degree for node, degree in G_copy.degree()])
+        print("G degree value_counts: \n", degree_series.value_counts(normalize=True))
         
-    #     nodePositions = nx.get_node_attributes(G_copy, 'position')
-    #     # nx.draw(G_copy, with_labels=True, pos=nodePositions)     # node_size: default=300
-    #     nx.draw(G_copy, with_labels=False, node_size=30, pos=nodePositions)     # draw node as small dot
-    #     # print(nx.info(G_copy))
-    #     plt.show()
+        # if graphType == "squareGrid":
+        #     nodePositions = nx.get_node_attributes(G_copy, 'position')
+        #     # nx.draw(G_copy, with_labels=True, pos=nodePositions)     # node_size: default=300
+        #     nx.draw(G_copy, with_labels=False, node_size=30, pos=nodePositions)     # draw node as small dot
+        #     # print(nx.info(G_copy))
+        #     plt.show()
+        # else:
+        #     # nx.draw(G_copy, with_labels=True)     # node_size: default=300
+        #     nx.draw(G_copy, with_labels=False, node_size=30)     # draw node as small dot
+        #     plt.show()
 
-    #     filepath = f"{filepath}{failureType}/{repType}/{repCase}/"
-    #     with open(f"{filepath}failureLink_squareGrid_{len(labelMapping)}.csv", 'w') as file:
-    #         for failLink in failLinkList:
-    #             file.write(f"{failLink[0]},{failLink[1]}\n")
+        # write failureNode file
+        filepath = f"{filepath}failureScenarioFile/{failureType}/{failureCase}/"
+        with open(f"{filepath}failureNode_{graphType}_{numNodes}.csv", 'w') as file:
+            for operation in ["stop", "start"]:
+                file.write(f"operation={operation}\n")
+                for failNode in failNodeList:
+                    file.write(f"{failNode}\n")
+        
+        # write failurePartition file
+        with open(f"{filepath}failurePartition_{graphType}_{numNodes}.csv", 'w') as file:
+            file.write(f"operation=stop\n")
+            for node in G_copy.nodes:
+                file.write(f"{node}, ")
+            file.write("\n")
+            file.write(f"operation=start\n")
+            for node in G.nodes:
+                file.write(f"{node}, ")
+            file.write("\n")
+
+        # generate testDst that excludes failed nodes
+        failNodeSet = set(failNodeList)
+        testDstAssignmentFile = f"{filepath}testDst_{graphType}_{numNodes}.csv"
+        genTestDstAssignmentFileFromVid(vidAssignmentFile, testDstAssignmentFile, excludeNodes=failNodeSet)
+
+        if graphType == "squareGrid":
+            # print grid to file
+            posToNodeMap = {G.nodes[n]['position']: n for n in G.nodes}
+            xl = 0
+            xr = numCols - 1
+            yl = 0
+            yr = numCols - 1
+            with open(f"{filepath}printGrid_squareGrid_{numNodes}.csv", 'w') as file:
+                rowstr = f"{' ': <3}\t\t"   # variable:{fill character}{align left< or right> or center^}{width}    print 3 whitespaces b4 \t\t
+                for x in range(xl, xr+1):
+                    rowstr += f"{x:5d}\t"
+                rowstr += "\n"
+                file.write(rowstr)
+
+                for y in range(yl, yr+1):
+                    rowstr = f"{y:3d}\t\t"  # specify width to be 3, padded with spaces
+                    for x in range(xl, xr+1):
+                        if posToNodeMap[(x,y)] not in failNodeSet:
+                            rowstr += f"{posToNodeMap[(x,y)]:5d}\t"  # specify width to be 5, padded with spaces
+                        else:
+                            rowstr += f"{' ': <5}\t"   # variable:{fill character}{align left< or right> or center^}{width}    print ' ' with total width = 5, fill w/ whitespaces, b4 \t
+                    rowstr += "\n"
+                    file.write(rowstr)
+
+
+    elif failureType.startswith("linkFailure"):
+        pattern = r"linkFailure(\d+)pc"
+        regexmatch = re.fullmatch(pattern, failureType)
+
+        assert regexmatch, f"Error: unrecognized failureType: {failureType}"
+        failurePercent = int(regexmatch.group(1)) / 100     # if failureType="nodeFailure10pc", failurePercent = 0.1
+        print(f"link failure percentage: {failurePercent}")
+
+        numfailLinks = int(round(G.number_of_edges() * failurePercent))
+        print("numfailLinks: ", numfailLinks)
+        numfailedLinks = 0
+        failLinkList = list()
+        G_copy = G.copy()
+        while (numfailedLinks < numfailLinks):
+            GisConnected = False
+            while not GisConnected:
+                # failLinkList = sample(list(G_copy.edges), numfailLinks)     # select random links to fail
+                failLink = choice(list(G_copy.edges))     # fail one link at a time
+                # for failLink in failLinkList:
+                G_copy.remove_edge(failLink[0], failLink[1])
+                if nx.is_connected(G_copy):
+                    GisConnected = True
+                    numfailedLinks += 1
+                    failLinkList.append(failLink)
+                    # print(f"Graph G removed failLink={failLink}, numfailedLinks={numfailedLinks}")
+                else:
+                    # for failLink in failLinkList:
+                    G_copy.add_edge(failLink[0], failLink[1])
+                    print(f"Graph G with numfailedLinks={numfailedLinks} w/o failLink={failLink} is not connected, try again")
+            
+                
+        degree_series = pandas.Series(data=[degree for node, degree in G_copy.degree()])
+        print("G degree value_counts: \n", degree_series.value_counts(normalize=True))
+        
+        # nodePositions = nx.get_node_attributes(G_copy, 'position')
+        # nx.draw(G_copy, with_labels=True, pos=nodePositions)     # node_size: default=300
+        # # nx.draw(G_copy, with_labels=False, node_size=30, pos=nodePositions)     # draw node as small dot
+        # nx.draw(G_copy, with_labels=True)     # node_size: default=300
+        # # print(nx.info(G_copy))
+        # plt.show()
+
+        filepath = f"{filepath}failureScenarioFile/{failureType}/{failureCase}/"
+        with open(f"{filepath}failureLink_{graphType}_{numNodes}.csv", 'w') as file:
+            for operation in ["stop", "start"]:
+                file.write(f"operation={operation}\n")
+                for failLink in failLinkList:
+                    file.write(f"{failLink[0]},{failLink[1]}\n")
+
+    elif failureType.startswith("partition"):
+        pattern = r"partition(\d+)"
+        regexmatch = re.fullmatch(pattern, failureType)
+
+        assert regexmatch, f"Error: unrecognized failureType: {failureType}"
+        numPartition = int(regexmatch.group(1))     # if failureType="partition2", numPartition = 2
+        print(f"numPartition: {numPartition}")
+        
+        # components = community.kernighan_lin_bisection(G, max_iter=100) # return a pair of sets of nodes representing the bipartition, max_iter: max number of attempt swaps to find an improvemement before giving up
+        # Gsub0 = G.subgraph(components[0])
+        # # Gsub1 = G.subgraph(components[1])
+        # nodePositions = nx.get_node_attributes(G, 'position')
+        # nx.draw(Gsub0, with_labels=True, pos=nodePositions)     # node_size: default=300
+        # # nx.draw(Gsub0, with_labels=False, node_size=30, pos=nodePositions)     # draw node as small dot
+        # plt.show()
+
+        assert graphType == "squareGrid", f"Error: failureType: {failureType}, graphType != squareGrid"
+        assert numPartition == 2 or numPartition == 4, f"Error: failureType: {failureType}, numPartition: {numPartition}"
+        posToNodeMap = {G.nodes[n]['position']: n for n in G.nodes}
+
+        G_copy = G.copy()
+        failLinkList = list()
+        # remove link btw two middle nodes on each row (same y coordinate)
+        edgeIndexMiddle = int((numCols-1) / 2)
+        for y in range(0, numCols):
+            failLink = (posToNodeMap[(edgeIndexMiddle,y)], posToNodeMap[(edgeIndexMiddle+1,y)])
+            failLinkList.append(failLink)
+            G_copy.remove_edge(failLink[0], failLink[1])
+
+        if numPartition == 4:
+            # remove link btw two middle nodes on each column (same x coordinate)
+            for x in range(0, numCols):
+                failLink = (posToNodeMap[(x, edgeIndexMiddle)], posToNodeMap[(x, edgeIndexMiddle+1)])
+                failLinkList.append(failLink)
+                G_copy.remove_edge(failLink[0], failLink[1])
+        
+        num_connected_component = nx.number_connected_components(G_copy)
+        assert num_connected_component == numPartition, f"Error: failureType: {failureType}, num_connected_component={num_connected_component} != numPartition={numPartition}"
+        
+        # write failureLink file
+        filepath = f"{filepath}failureScenarioFile/{failureType}/{failureCase}/"
+        with open(f"{filepath}failureLink_{graphType}_{numNodes}.csv", 'w') as file:
+            for operation in ["stop", "start"]:
+                file.write(f"operation={operation}\n")
+                for failLink in failLinkList:
+                    file.write(f"{failLink[0]},{failLink[1]}\n")
+
+        # write failurePartition file
+        with open(f"{filepath}failurePartition_{graphType}_{numNodes}.csv", 'w') as file:
+            file.write(f"operation=stop\n")
+            for component in nx.connected_components(G_copy):
+                for node in component:
+                    file.write(f"{node}, ")
+                file.write("\n")
+                print("component size:", len(component))
+            file.write(f"operation=start\n")
+            for node in G.nodes:
+                file.write(f"{node}, ")
+            file.write("\n")
         
 
 # excludeNodes: set of nodes that can't appear in testDstList
-def genTestDstAssignmentFileFromVid(graphType, filepath, numNodes, excludeNodes):
+def genTestDstAssignmentFileFromVid(vidAssignmentFile, testDstAssignmentFile, excludeNodes):
     numTestDst = 200    # number of nodes in testDstList per node in labelList
     labelList = list()  # nodes in vidAssignmentFile
     availableList = list()  # nodes in vidAssignmentFile but not in excludeNodes
 
-    vidAssignmentFile = f"{filepath}vidlist_{graphType}_{numNodes}_maxId60000.csv"
-    testDstAssignmentFile = f"{filepath}testDst_{graphType}_{numNodes}.csv"
-
+    # vidAssignmentFile = f"{filepath}vidlist_{graphType}_{numNodes}_maxId60000.csv"
+    # testDstAssignmentFile = f"{filepath}testDst_{graphType}_{numNodes}.csv"
 
     with open(vidAssignmentFile, newline='') as fileToRead:
         # row format: vid
@@ -824,44 +1045,42 @@ def genTestDstAssignmentFileFromVid(graphType, filepath, numNodes, excludeNodes)
 
 
 def checkupCmdlogFile(resultCmdlogFile):
-    with open(resultCmdlogFile, newline='') as fileToRead:
+    with open(resultCmdlogFile, newline='') as fileToRead:    # newline=None (default): lines in the input can end in '\n', '\r', or '\r\n', and these are translated into '\n' before being returned to the caller;  newline='': line endings are returned to the caller untranslated
         # searchStr = "Incremented station SRC: stationShortRetryCounter = "
         # searchStr = "Incremented station LRC: stationLongRetryCounter = "
-        # searchStr = "Removing next hop of failed VLR packet: "
-        # searchStr = "Processing failed VLR packet: "
-        searchStrs = ["handleLostPneis: ", "failed VLR packet: ", "Purging pset of expired pneis: ", "NonQosRecoveryProcedure::isRetryLimitReached: ", "has expired, leaving vnetwork", "WARN"]     # "Ieee802154Mac::manageMissingAck: "
+        # searchStrs = ["handleLostPneis: ", "failed VLR packet: ", "Purging pset of expired pneis: ", "NonQosRecoveryProcedure::isRetryLimitReached: ", "has expired, leaving vnetwork", "WARN"]     # "Ieee802154Mac::manageMissingAck: "
+        searchStrs = ["WARN"]
         # searchStr1 = "ohno NonQosRecoveryProcedure::isRetryLimitReached: SRC = "
         # searchStr2 = "ohno NonQosRecoveryProcedure::isRetryLimitReached: LRC = "
-        i = 0
-        rcList = []
-        rcLimitList = []
-        lastrow = ""
-        lastrowprinted = False
-        for row in fileToRead:
-            # i += 1
-            # startIndex = row.find(searchStr1)
-            # startIndex = row.find(searchStr2) if startIndex == -1 else startIndex
-            # if startIndex > -1:
-            #     rowpartial = row[startIndex + len(searchStr):]
-            #     # digitList = list(filter(str.isdigit, rowpartial))    # get all characters where str.isdigit() returns true, put in list, e.g. ['1', '2']
-            #     # number = int(''.join(digitList))  # join all number digits in list and convert to int
-            #     numberList = [int(s) for s in re.findall(r'\d+', rowpartial)]
-            #     # print(f"i={i}  number={numberList}")
-            #     rcList.append(numberList[0])
-            #     rcLimitList.append(numberList[1])
+        
+        resultCmdlogFileToWrite = f"{resultCmdlogFile[:-4]}-warn.out"
+        
+        with open(resultCmdlogFileToWrite, 'w') as file:
+            i = 0
+            lastrow = ""
+            lastrowprinted = False
+            for row in fileToRead:
+                # i += 1
+                # startIndex = row.find(searchStr1)
+                # startIndex = row.find(searchStr2) if startIndex == -1 else startIndex
+                # if startIndex > -1:
+                #     rowpartial = row[startIndex + len(searchStr):]
+                #     # digitList = list(filter(str.isdigit, rowpartial))    # get all characters where str.isdigit() returns true, put in list, e.g. ['1', '2']
+                #     # number = int(''.join(digitList))  # join all number digits in list and convert to int
+                #     numberList = [int(s) for s in re.findall(r'\d+', rowpartial)]
 
-            rowprinted = False
-            for searchStr in searchStrs:
-                startIndex = row.find(searchStr) 
-                if startIndex > -1:
-                    if not lastrowprinted:
-                        print(lastrow)
-                    print(row)
-                    rowprinted = True
-                    break
-            
-            lastrow = row
-            lastrowprinted = rowprinted
+                rowprinted = False
+                for searchStr in searchStrs:
+                    startIndex = row.find(searchStr) 
+                    if startIndex > -1:
+                        if not lastrowprinted:
+                            file.write(lastrow)
+                        file.write(row)
+                        rowprinted = True
+                        break
+                
+                lastrow = row
+                lastrowprinted = rowprinted
 
             # if i > 2000000:
             #     break
@@ -903,89 +1122,99 @@ def checkupResultTestFile(testfileToRead):
 
 
 if __name__ == "__main__":
-    graphType = "powerlaw2"    # squareGrid, powerlaw2, pathGraph
-    graphCase = "g1"
-    numNodes = 5000
-    maxDeliveryTime = 50    # TestPacket that aren't recorded "arrived" within sendTime + maxDeliveryTime will be considered failed
-    testpathsStartTime = 700
+    # for numNodes in [100, 1000, 10000]:
+    if True:
+        graphType = "squareGrid"    # squareGrid, powerlaw2, pathGraph
+        graphCase = "g0"
+        numNodes = 100
+        maxDeliveryTime = 50    # TestPacket that aren't recorded "arrived" within sendTime + maxDeliveryTime will be considered failed
+        testpathsStartTime = 0
 
-    failureType = "nodeFailure20pc-2"    # nofailure, nodeFailure10pc, linkFailure10pc, -notemp-nodism-nohear
-    repType = "repAtCentre"     # repAtCorner, repAtCentre, repAtCorn20, repAtEdge
-    repCase = "repCase0"
-    vsetCardType = "vsetHalfCard2-1"    # vsetHalfCard1-2, vsetHalfCard2-1, vsetHalfCard3-0
-    filepath = f"results/"
-    # filepath = f"results/nofailure/vsetHalfCard1-2/repAtCorner/"
-    filepath = f"results/{failureType}/{vsetCardType}/{repType}/{repCase}/"
-    # filepath = f"../../../myvlr_results/nofailure/"
-    # resultNodeFile = f"{filepath}nodeStats.csv"
-    # resultTestFile = f"{filepath}sendRecords.csv"
-    resultNodeFile = f"{filepath}nodeStats_{graphType}_{numNodes}.csv"
-    resultTestFile = f"{filepath}sendRecords_{graphType}_{numNodes}.csv"
-    resultNodeFile_renamed = f"{filepath}nodeStats_{graphType}_{numNodes}.csv"
-    resultTestFile_renamed = f"{filepath}sendRecords_{graphType}_{numNodes}.csv"
-    edgelistFile = f"{filepath}PGedgelist_{graphType}_{numNodes}.csv"
-    gpickleFile = f"{filepath}PGpickle_{graphType}_{numNodes}.gpickle"
-    numvroutesFile = f"{filepath}numvroutes_{graphType}_{numNodes}.csv"
-    vroutepathsFile_partial = f"{filepath}vroutepaths_partial_{graphType}_{numNodes}.csv"
-    vroutepathsFile = f"{filepath}vroutepaths_{graphType}_{numNodes}.csv"
-    testpathsFile = f"{filepath}testpaths_{graphType}_{numNodes}.csv"
-    # testpathsbysrcFile = f"{filepath}testpathsbysrc_{graphType}_{numNodes}.csv"
-    testdeliveryFile = f"{filepath}testdelivery_{graphType}_{numNodes}.csv"
-    constructtimeFile = f"{filepath}constructtime_{graphType}_{numNodes}.csv"
-    constructlogFile = f"{filepath}constructlog_{graphType}_{numNodes}.txt"
-    vlrpacketsFile = f"{filepath}vlrpackets_{graphType}_{numNodes}.csv"
+        PGmapTimes = [0, 500, 1000]     # must match the number of writeNodeStatsTimes
 
-    resultCmdlogFile = f"{filepath}cmdenvlog_{graphType}_{numNodes}.out"
-    # resultCmdlogFile = f"{filepath}Vlr-#0.out"
+        failureType = "partition2_heal"    # nofailure, nodeFailure10pc, linkFailure10pc, partition2, -notemp-nodism-nohear
+        repType = "repAtCentre"     # repAtCorner, repAtCentre, repAtCorn20, repAtEdge
+        caseNum = "rootNoFixed-case0-r0"       # rootNoFixed-case0-r0
+        vsetCardType = "vsetHalfCard2-0"    # vsetHalfCard1-2, vsetHalfCard2-1, vsetHalfCard3-0
+        filepath = f"results/"
+        # filepath = f"results/nofailure/vsetHalfCard1-2/repAtCorner/"
+        filepath = f"results/{graphType}/{graphCase}/{failureType}/{vsetCardType}/{caseNum}/"
+        # filepath = f"../../../myvlr_results/nofailure/"
+        # resultNodeFile = f"{filepath}nodeStats.csv"
+        # resultTestFile = f"{filepath}sendRecords.csv"
+        resultNodeFile = f"{filepath}nodeStats_{graphType}_{numNodes}.csv"
+        resultTestFile = f"{filepath}sendRecords_{graphType}_{numNodes}.csv"
+        resultNodeFile_renamed = f"{filepath}nodeStats_{graphType}_{numNodes}.csv"
+        resultTestFile_renamed = f"{filepath}sendRecords_{graphType}_{numNodes}.csv"
+        edgelistFile = f"{filepath}PGedgelist_{graphType}_{numNodes}.csv"
+        gpickleFile = f"{filepath}PGpickle_{graphType}_{numNodes}.gpickle"
+        numvroutesFile = f"{filepath}numvroutes_{graphType}_{numNodes}.csv"
+        vroutepathsFile_partial = f"{filepath}vroutepaths_partial_{graphType}_{numNodes}.csv"
+        vroutepathsFile = f"{filepath}vroutepaths_{graphType}_{numNodes}.csv"
+        testpathsFile = f"{filepath}testpaths_{graphType}_{numNodes}.csv"
+        # testpathsbysrcFile = f"{filepath}testpathsbysrc_{graphType}_{numNodes}.csv"
+        testdeliveryFile = f"{filepath}testdelivery_{graphType}_{numNodes}.csv"
+        constructtimeFile = f"{filepath}constructtime_{graphType}_{numNodes}.csv"
+        constructlogFile = f"{filepath}constructlog_{graphType}_{numNodes}.txt"
+        vlrpacketsFile = f"{filepath}vlrpackets_{graphType}_{numNodes}.csv"
 
-    filepath = f"networks/physicalTopo/{graphType}/{graphCase}/"
-    numCols = int(sqrt(numNodes))
-    genGraphEdgelistFile(graphType, filepath, numCols, numNodes)
-    # readGraphpickle(graphType, filepath, numCols, numNodes)
-    # filepath = f"vidAssignmentFile/failureScenarioFile/"
-    # failureDirectory = "nodeFailure10pc-hinumvr"
-    # genFailureScenarioFileFromVid(vidAssignmentFile, numCols, filepath, failureType=failureDirectory, repType="repAtCentre", repCase="repCase0", nofailNodes={330})
+        resultCmdlogFile = f"{filepath}cmdenvlog_{graphType}_{numNodes}.out"
+        # resultCmdlogFile = f"{filepath}Vlr-#0.out"
 
-    # ### generate testDst that includes all nodes in vidAssignmentFile
-    # genTestDstAssignmentFileFromVid(graphType, filepath, numNodes, excludeNodes=[])
-    # ### exclude failed nodes from testDst
-    # filepath = f"vidAssignmentFile/failureScenarioFile/{failureDirectory}/repAtCentre/repCase0/"
-    # failureNodeFile = f"{filepath}failureNode_squareGrid_{numNodes}.csv"
-    # testDstAssignmentFile = f"{filepath}testDst_ring_{numNodes}_maxId25000.csv"
-    # failNodeList = []
-    # with open(failureNodeFile, newline='') as fileToRead:
-    #     # row format: node id, node index
-    #     for row in fileToRead:
-    #         failNodeList.append(eval(row)[0])     # eval(row) return a tuple
-    # print("failNodeList size:", len(failNodeList))
-    # genTestDstAssignmentFileFromVid(vidAssignmentFile, testDstAssignmentFile, excludeNodes=failNodeList)
+        # filepath = f"networks/physicalTopo/{graphType}/{graphCase}/"
+        # numCols = int(sqrt(numNodes))
+        # # genGraphEdgelistFile(graphType, filepath, numCols, numNodes)
+        # # readGraphpickle(graphType, filepath, numCols, numNodes)
+        # genFailureScenarioFileFromVid(graphType, filepath, numCols, numNodes, failureType)
 
-    # checkupCmdlogFile(resultCmdlogFile)     # cmdenvlog_squareGrid_1024-warn.out
-    # checkupResultNodeFile(resultNodeFile)
-    # checkupResultTestFile(resultTestFile)
+        # ### generate testDst that includes all nodes in vidAssignmentFile
+        # vidAssignmentFile = f"{filepath}vidlist_{graphType}_{numNodes}_maxId60000.csv"
+        # testDstAssignmentFile = f"{filepath}testDst_{graphType}_{numNodes}.csv"
+        # genTestDstAssignmentFileFromVid(vidAssignmentFile, testDstAssignmentFile, excludeNodes=[])
+        # ### exclude failed nodes from testDst
+        # filepath = f"vidAssignmentFile/failureScenarioFile/{failureDirectory}/repAtCentre/repCase0/"
+        # failureNodeFile = f"{filepath}failureNode_squareGrid_{numNodes}.csv"
+        # testDstAssignmentFile = f"{filepath}testDst_ring_{numNodes}_maxId25000.csv"
+        # failNodeList = []
+        # with open(failureNodeFile, newline='') as fileToRead:
+        #     # row format: node id, node index
+        #     for row in fileToRead:
+        #         failNodeList.append(eval(row)[0])     # eval(row) return a tuple
+        # print("failNodeList size:", len(failNodeList))
+        # genTestDstAssignmentFileFromVid(vidAssignmentFile, testDstAssignmentFile, excludeNodes=failNodeList)
 
-    
-    # PG = processResultNodeFile(resultNodeFile, edgelistFile, gpickleFile, numvroutesFile, vroutepathsFile_partial, constructtimeFile, constructlogFile)
+        # checkupCmdlogFile(resultCmdlogFile)     # cmdenvlog_squareGrid_1024-warn.out
+        # checkupResultNodeFile(resultNodeFile)
+        # checkupResultTestFile(resultTestFile)
 
-    # # PG = nx.Graph()
-    # # PG.add_node(6)
-    # # PG.add_edge(5, 4)
-    # # PG.add_edge(5, 3)
-    # # PG.add_edge(5, 2)
+        PGmap = processResultNodeFile(resultNodeFile, edgelistFile, gpickleFile, PGmapTimes, numvroutesFile, vroutepathsFile_partial, constructtimeFile, constructlogFile)
+        # shortest path of msg delivered at msgTime should be calculated based on PGmap[PGtime] where PGtime is the largest key in PGmap <= msgTime
 
-    # PG = nx.read_edgelist(edgelistFile, delimiter=',', nodetype=int)  # physical graph
-    # PG = nx.read_gpickle(gpickleFile)
-    # # nx.draw(PG, with_labels=True)
-    # nodePositions = nx.get_node_attributes(PG, 'simPosition')
-    # nx.draw(PG, with_labels=True, pos=nodePositions)
-    # print(nx.info(PG))
-    # # print(PG.nodes(data=True))
-    # plt.show()
+        # PG = nx.Graph()
+        # PG.add_node(6)
+        # PG.add_edge(5, 4)
+        # PG.add_edge(5, 3)
+        # PG.add_edge(5, 2)
+        # # PGmap = {0: PG}
+        # # try:
+        # #     shortestPath = nx.shortest_path(PG, 5, 6)
+        # #     print(shortestPath)
+        # # except Exception as e:
+        # #     print(e)
 
-    # calcVrouteStretchWithPG(vroutepathsFile_partial, vroutepathsFile, PG)
-    # processResultTestFile(resultTestFile, testpathsFile, PG, testdeliveryFile, maxDeliveryTime, vlrpacketsFile, testpathsStartTime)
+        # PG = nx.read_edgelist(edgelistFile, delimiter=',', nodetype=int)  # physical graph
+        # PG = nx.read_gpickle(gpickleFile)
+        # # nx.draw(PG, with_labels=True)
+        # nodePositions = nx.get_node_attributes(PG, 'simPosition')
+        # nx.draw(PG, with_labels=True, pos=nodePositions)
+        # print(nx.info(PG))
+        # # print(PG.nodes(data=True))
+        # plt.show()
 
-    # getDeliveryFileFromResultTestFile(resultTestFile, testdeliveryFile, maxDeliveryTime)
+        calcVrouteStretchWithPG(vroutepathsFile_partial, vroutepathsFile, PGmap)
+        processResultTestFile(resultTestFile, testpathsFile, PGmap, testdeliveryFile, maxDeliveryTime, vlrpacketsFile, testpathsStartTime)
+
+        # getDeliveryFileFromResultTestFile(resultTestFile, testdeliveryFile, maxDeliveryTime)
 
     
 

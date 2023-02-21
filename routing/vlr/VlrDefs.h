@@ -22,7 +22,7 @@ typedef unsigned int VlrRingVID;
 
 #define VLRRINGVID_NULL    65535
 #define VLRRINGVID_DUMMY    65533
-#define VLRRINGVID_MAX    250     // max allowable VlrRingVID, used in computing distance in vid space (ensure maxVID+1 wouldn't overflow an unsigned int)
+#define VLRRINGVID_MAX    60000     // max allowable VlrRingVID, used in computing distance in vid space (ensure maxVID+1 wouldn't overflow an unsigned int)
 
 };  // namespace omnetvlr
 

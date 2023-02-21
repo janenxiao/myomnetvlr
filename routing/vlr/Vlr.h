@@ -111,8 +111,8 @@ class Vlr : public RoutingBase
     // statistics measurement
     bool sendTestPacket;
     static const double testSendInterval;         // time interval to send a test message for statistics measurement
-    static const bool recordReceivedMsg = false;          // record received message (may not be directed to me) with recordMessageRecord(/*action=*/2
-    static const bool recordDroppedMsg = true;          // record message arrived and destined for me, or dropped at me with recordMessageRecord(/*action=*/1 or 4
+    static const bool recordReceivedMsg = true;          // record received message (may not be directed to me) with recordMessageRecord(/*action=*/2
+    static const bool recordDroppedMsg = false;          // record message arrived and destined for me, or dropped at me with recordMessageRecord(/*action=*/1 or 4
     unsigned int numTestPacketReceived = 0;       // number of test messages received (handled or forwarded)
 
     // time to start sending TestPacket

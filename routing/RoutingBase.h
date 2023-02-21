@@ -40,6 +40,7 @@ class RoutingBase : public cSimpleModule
     unsigned int vid;
     static std::vector<std::pair<double, std::vector<std::set<unsigned int>>>> vidRingRegistry;      // vidRingRegistry[0] (network partition stage 0): (time, [set contains vids in a connected component after time])
     std::set<unsigned int> vidRingRegVset;
+    static std::set<unsigned int> nodesVsetCorrect;
 
     simsignal_t dropSignal;
 
@@ -70,6 +71,8 @@ class RoutingBase : public cSimpleModule
     std::set<unsigned int> failureSimulationUnaddedPneiVids;  // pnei vids that haven't been added to failureSimulationPneiVidMap bc I don't know their corresponding gete index yet, once I receive a msg from any of them, I'll add it to failureSimulationPneiVidMap
     bool selfNodeFailure = false;   // if true, I'm simulating node failure and I won't process any VLR messages
     std::map<int, FailedPacketDelayTimer *> failureGateToPacketMap;   // store failed packet to some gateIndex to process later, simulate time for sending a packet multiple times b4 signaling a link break 
+
+    double simulateBeaconLostRate;    // value in range [0, 1), ratio of beacons lost because of collision, default 0, e.g., 0.1 means 10% probability that I'll ignore a received beacon to simulate collision
 
   public:
     virtual ~RoutingBase();

@@ -41,8 +41,8 @@ class Vrr : public RoutingBase
     double repSeqValidityInterval;   // max time that node can hold an unchanged rep sequence number, after that the rep is considered expired
     double inNetworkEmptyVsetWarmupTime;      // wait time before changing inNetwork to true (with empty vset) if a node cannot find a inNetwork neighbor to use as a proxy to join the network
 
-    static const int routeSetupReqWaitTime = 20;    // timeout for reply to a setupReq sent
-    static const int fillVsetInterval = 10;         // time interval to check on pendingVset, purge nonEssRoutes, and do other periodic chores
+    static const int routeSetupReqWaitTime = 10;    // timeout for reply to a setupReq sent
+    static const int fillVsetInterval = 5;         // time interval to check on pendingVset, purge nonEssRoutes, and do other periodic chores
     static const int representativeMapMaxSize = 6;         // max number of reps (excluding myself) in representativeMap, NOTE can include expired records
 
     int setupReqRetryLimit;   // only used for lost vnei
@@ -58,8 +58,8 @@ class Vrr : public RoutingBase
     // statistics measurement
     bool sendTestPacket;
     static const int testSendInterval = 10;         // time interval to send a test message for statistics measurement
-    static const bool recordReceivedMsg = false;          // record received message (may not be directed to me) with recordMessageRecord(/*action=*/2
-    static const bool recordDroppedMsg = true;          // record message arrived and destined for me, or dropped at me with recordMessageRecord(/*action=*/1 or 4
+    static const bool recordReceivedMsg = true;          // record received message (may not be directed to me) with recordMessageRecord(/*action=*/2
+    static const bool recordDroppedMsg = false;          // record message arrived and destined for me, or dropped at me with recordMessageRecord(/*action=*/1 or 4
     unsigned int numTestPacketReceived = 0;       // number of test messages received (handled or forwarded)
 
     // time to start sending TestPacket
@@ -219,7 +219,7 @@ class Vrr : public RoutingBase
     // node status helper
     void removeRouteFromLostPneiBrokenVroutes(const VlrPathID& pathid, const VlrRingVID& lostPneiVid);
     VlrRingVID getProxyForSetupReq(bool checkInNetwork=true) const;
-    bool pendingVsetAdd(VlrRingVID node, int numTrials);
+    bool pendingVsetAdd(VlrRingVID node, int numTrials, bool heardRep=false);
     void pendingVsetErase(VlrRingVID node);
     void vsetInsertRmPending(VlrRingVID node);
     bool vsetEraseAddPending(VlrRingVID node, bool addToPending);
