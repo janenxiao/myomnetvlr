@@ -40,6 +40,7 @@ OBJS = \
     $O/node/L2Queue.o \
     $O/node/Routing.o \
     $O/routing/RoutingBase.o \
+    $O/routing/configurator/RoutingConfigurator.o \
     $O/routing/vlr/PsetTable.o \
     $O/routing/vlr/Vlr.o \
     $O/routing/vlr/VlrRingRoutingTable.o \

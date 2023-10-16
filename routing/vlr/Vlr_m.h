@@ -37,6 +37,7 @@ class DismantleInt;
 class VlrIntTestPacket;
 class RepairLinkReqFloodInt;
 class RepairLinkReplyInt;
+class RepairLinkFailInt;
 class RepairRouteInt;
 class NotifyVsetInt;
 class RepairLocalReqFloodInt;
@@ -723,6 +724,7 @@ inline void doParsimUnpacking(omnetpp::cCommBuffer *b, SetupReplyInt& obj) {obj.
  *     unsigned int proxy;
  *     unsigned int newnode;
  *     unsigned int src;
+ *     // bool notifyVsetOnly;            // if true, this SetupFail is only used as a NotifyVset to newnode
  *     VlrIntVidVec trace;         // if specified, not using greedy routing
  * }
  * </pre>
@@ -768,7 +770,7 @@ inline void doParsimPacking(omnetpp::cCommBuffer *b, const SetupFailInt& obj) {o
 inline void doParsimUnpacking(omnetpp::cCommBuffer *b, SetupFailInt& obj) {obj.parsimUnpack(b);}
 
 /**
- * Class generated from <tt>routing/vlr/Vlr.msg:193</tt> by opp_msgtool.
+ * Class generated from <tt>routing/vlr/Vlr.msg:194</tt> by opp_msgtool.
  * <pre>
  * //
  * // setup a non-essential vroute, uses unsigned int for vid
@@ -841,7 +843,7 @@ inline void doParsimPacking(omnetpp::cCommBuffer *b, const AddRouteInt& obj) {ob
 inline void doParsimUnpacking(omnetpp::cCommBuffer *b, AddRouteInt& obj) {obj.parsimUnpack(b);}
 
 /**
- * Class generated from <tt>routing/vlr/Vlr.msg:208</tt> by opp_msgtool.
+ * Class generated from <tt>routing/vlr/Vlr.msg:209</tt> by opp_msgtool.
  * <pre>
  * //
  * // teardown that uses unsigned int for vid
@@ -903,7 +905,7 @@ inline void doParsimPacking(omnetpp::cCommBuffer *b, const TeardownInt& obj) {ob
 inline void doParsimUnpacking(omnetpp::cCommBuffer *b, TeardownInt& obj) {obj.parsimUnpack(b);}
 
 /**
- * Class generated from <tt>routing/vlr/Vlr.msg:219</tt> by opp_msgtool.
+ * Class generated from <tt>routing/vlr/Vlr.msg:220</tt> by opp_msgtool.
  * <pre>
  * //
  * // teardown that uses unsigned int for vid
@@ -955,7 +957,7 @@ inline void doParsimPacking(omnetpp::cCommBuffer *b, const DismantleInt& obj) {o
 inline void doParsimUnpacking(omnetpp::cCommBuffer *b, DismantleInt& obj) {obj.parsimUnpack(b);}
 
 /**
- * Class generated from <tt>routing/vlr/Vlr.msg:227</tt> by opp_msgtool.
+ * Class generated from <tt>routing/vlr/Vlr.msg:228</tt> by opp_msgtool.
  * <pre>
  * //
  * // test message to measure route length that uses unsigned int for vid
@@ -1000,7 +1002,7 @@ inline void doParsimPacking(omnetpp::cCommBuffer *b, const VlrIntTestPacket& obj
 inline void doParsimUnpacking(omnetpp::cCommBuffer *b, VlrIntTestPacket& obj) {obj.parsimUnpack(b);}
 
 /**
- * Class generated from <tt>routing/vlr/Vlr.msg:236</tt> by opp_msgtool.
+ * Class generated from <tt>routing/vlr/Vlr.msg:237</tt> by opp_msgtool.
  * <pre>
  * //
  * // repairLinkReq with trace that uses unsigned int for vid
@@ -1057,7 +1059,7 @@ inline void doParsimPacking(omnetpp::cCommBuffer *b, const RepairLinkReqFloodInt
 inline void doParsimUnpacking(omnetpp::cCommBuffer *b, RepairLinkReqFloodInt& obj) {obj.parsimUnpack(b);}
 
 /**
- * Class generated from <tt>routing/vlr/Vlr.msg:247</tt> by opp_msgtool.
+ * Class generated from <tt>routing/vlr/Vlr.msg:248</tt> by opp_msgtool.
  * <pre>
  * //
  * // repairLinkReply with trace that uses unsigned int for vid
@@ -1121,6 +1123,63 @@ inline void doParsimUnpacking(omnetpp::cCommBuffer *b, RepairLinkReplyInt& obj) 
  * Class generated from <tt>routing/vlr/Vlr.msg:262</tt> by opp_msgtool.
  * <pre>
  * //
+ * // repairLinkFail that uses unsigned int for vid
+ * //
+ * class RepairLinkFailInt extends VlrIntSetupPacket
+ * {
+ *     unsigned int dst;
+ *     unsigned int src;
+ *     VlrIntVidVec brokenPathids;		// avoid redefinition of std::vector<unsigned int>
+ *     // VlrIntPathidVec brokenPathids;  // dst sent repairLinkReply to src, src is nexthop in brokenPathids at dst; these vroutes were not repaired at src by the new temporary route
+ *     VlrPathID tempPathid;
+ * }
+ * </pre>
+ */
+class RepairLinkFailInt : public ::omnetvlr::VlrIntSetupPacket
+{
+  protected:
+    unsigned int dst = 0;
+    unsigned int src = 0;
+    VlrIntVidVec brokenPathids;
+    VlrPathID tempPathid;
+
+  private:
+    void copy(const RepairLinkFailInt& other);
+
+  protected:
+    bool operator==(const RepairLinkFailInt&) = delete;
+
+  public:
+    RepairLinkFailInt(const char *name=nullptr);
+    RepairLinkFailInt(const RepairLinkFailInt& other);
+    virtual ~RepairLinkFailInt();
+    RepairLinkFailInt& operator=(const RepairLinkFailInt& other);
+    virtual RepairLinkFailInt *dup() const override {return new RepairLinkFailInt(*this);}
+    virtual void parsimPack(omnetpp::cCommBuffer *b) const override;
+    virtual void parsimUnpack(omnetpp::cCommBuffer *b) override;
+
+    virtual unsigned int getDst() const;
+    virtual void setDst(unsigned int dst);
+
+    virtual unsigned int getSrc() const;
+    virtual void setSrc(unsigned int src);
+
+    virtual const VlrIntVidVec& getBrokenPathids() const;
+    virtual VlrIntVidVec& getBrokenPathidsForUpdate() { return const_cast<VlrIntVidVec&>(const_cast<RepairLinkFailInt*>(this)->getBrokenPathids());}
+    virtual void setBrokenPathids(const VlrIntVidVec& brokenPathids);
+
+    virtual const VlrPathID& getTempPathid() const;
+    virtual VlrPathID& getTempPathidForUpdate() { return const_cast<VlrPathID&>(const_cast<RepairLinkFailInt*>(this)->getTempPathid());}
+    virtual void setTempPathid(const VlrPathID& tempPathid);
+};
+
+inline void doParsimPacking(omnetpp::cCommBuffer *b, const RepairLinkFailInt& obj) {obj.parsimPack(b);}
+inline void doParsimUnpacking(omnetpp::cCommBuffer *b, RepairLinkFailInt& obj) {obj.parsimUnpack(b);}
+
+/**
+ * Class generated from <tt>routing/vlr/Vlr.msg:274</tt> by opp_msgtool.
+ * <pre>
+ * //
  * // repairRoute that uses unsigned int for vid
  * //
  * class RepairRouteInt extends VlrIntSetupPacket
@@ -1170,7 +1229,7 @@ inline void doParsimPacking(omnetpp::cCommBuffer *b, const RepairRouteInt& obj) 
 inline void doParsimUnpacking(omnetpp::cCommBuffer *b, RepairRouteInt& obj) {obj.parsimUnpack(b);}
 
 /**
- * Class generated from <tt>routing/vlr/Vlr.msg:270</tt> by opp_msgtool.
+ * Class generated from <tt>routing/vlr/Vlr.msg:282</tt> by opp_msgtool.
  * <pre>
  * //
  * // notify other of my vset, uses unsigned int for vid
@@ -1179,7 +1238,9 @@ inline void doParsimUnpacking(omnetpp::cCommBuffer *b, RepairRouteInt& obj) {obj
  * {
  *     unsigned int dst;
  *     unsigned int src;
+ *     unsigned int proxy;
  *     bool toVnei;
+ *     VlrIntVidVec trace;         // if specified, not using greedy routing
  * }
  * </pre>
  */
@@ -1188,7 +1249,9 @@ class NotifyVsetInt : public ::omnetvlr::VlrIntSetupPacket
   protected:
     unsigned int dst = 0;
     unsigned int src = 0;
+    unsigned int proxy = 0;
     bool toVnei = false;
+    VlrIntVidVec trace;
 
   private:
     void copy(const NotifyVsetInt& other);
@@ -1211,15 +1274,22 @@ class NotifyVsetInt : public ::omnetvlr::VlrIntSetupPacket
     virtual unsigned int getSrc() const;
     virtual void setSrc(unsigned int src);
 
+    virtual unsigned int getProxy() const;
+    virtual void setProxy(unsigned int proxy);
+
     virtual bool getToVnei() const;
     virtual void setToVnei(bool toVnei);
+
+    virtual const VlrIntVidVec& getTrace() const;
+    virtual VlrIntVidVec& getTraceForUpdate() { return const_cast<VlrIntVidVec&>(const_cast<NotifyVsetInt*>(this)->getTrace());}
+    virtual void setTrace(const VlrIntVidVec& trace);
 };
 
 inline void doParsimPacking(omnetpp::cCommBuffer *b, const NotifyVsetInt& obj) {obj.parsimPack(b);}
 inline void doParsimUnpacking(omnetpp::cCommBuffer *b, NotifyVsetInt& obj) {obj.parsimUnpack(b);}
 
 /**
- * Class generated from <tt>routing/vlr/Vlr.msg:279</tt> by opp_msgtool.
+ * Class generated from <tt>routing/vlr/Vlr.msg:293</tt> by opp_msgtool.
  * <pre>
  * //
  * // repairLocalReq with trace that uses unsigned int for vid
@@ -1283,7 +1353,7 @@ inline void doParsimPacking(omnetpp::cCommBuffer *b, const RepairLocalReqFloodIn
 inline void doParsimUnpacking(omnetpp::cCommBuffer *b, RepairLocalReqFloodInt& obj) {obj.parsimUnpack(b);}
 
 /**
- * Class generated from <tt>routing/vlr/Vlr.msg:292</tt> by opp_msgtool.
+ * Class generated from <tt>routing/vlr/Vlr.msg:306</tt> by opp_msgtool.
  * <pre>
  * //
  * // repairLocalReply with trace that uses unsigned int for vid
@@ -1349,7 +1419,7 @@ inline void doParsimPacking(omnetpp::cCommBuffer *b, const RepairLocalReplyInt& 
 inline void doParsimUnpacking(omnetpp::cCommBuffer *b, RepairLocalReplyInt& obj) {obj.parsimUnpack(b);}
 
 /**
- * Class generated from <tt>routing/vlr/Vlr.msg:308</tt> by opp_msgtool.
+ * Class generated from <tt>routing/vlr/Vlr.msg:322</tt> by opp_msgtool.
  * <pre>
  * //
  * // repairLocalPrev that uses unsigned int for vid
@@ -1429,6 +1499,7 @@ template<> inline omnetvlr::DismantleInt *fromAnyPtr(any_ptr ptr) { return check
 template<> inline omnetvlr::VlrIntTestPacket *fromAnyPtr(any_ptr ptr) { return check_and_cast<omnetvlr::VlrIntTestPacket*>(ptr.get<cObject>()); }
 template<> inline omnetvlr::RepairLinkReqFloodInt *fromAnyPtr(any_ptr ptr) { return check_and_cast<omnetvlr::RepairLinkReqFloodInt*>(ptr.get<cObject>()); }
 template<> inline omnetvlr::RepairLinkReplyInt *fromAnyPtr(any_ptr ptr) { return check_and_cast<omnetvlr::RepairLinkReplyInt*>(ptr.get<cObject>()); }
+template<> inline omnetvlr::RepairLinkFailInt *fromAnyPtr(any_ptr ptr) { return check_and_cast<omnetvlr::RepairLinkFailInt*>(ptr.get<cObject>()); }
 template<> inline omnetvlr::RepairRouteInt *fromAnyPtr(any_ptr ptr) { return check_and_cast<omnetvlr::RepairRouteInt*>(ptr.get<cObject>()); }
 template<> inline omnetvlr::NotifyVsetInt *fromAnyPtr(any_ptr ptr) { return check_and_cast<omnetvlr::NotifyVsetInt*>(ptr.get<cObject>()); }
 template<> inline omnetvlr::RepairLocalReqFloodInt *fromAnyPtr(any_ptr ptr) { return check_and_cast<omnetvlr::RepairLocalReqFloodInt*>(ptr.get<cObject>()); }

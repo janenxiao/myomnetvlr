@@ -39,15 +39,17 @@ class Vrr : public RoutingBase
     double maxJitter;
     double neighborValidityInterval;
     double repSeqValidityInterval;   // max time that node can hold an unchanged rep sequence number, after that the rep is considered expired
+    double repSeqPersistenceInterval;   // rep can be erased in representativeMap after lastHeard + repSeqPersistenceInterval, we should be sure that this rep has expired at all nodes in network
     double inNetworkEmptyVsetWarmupTime;      // wait time before changing inNetwork to true (with empty vset) if a node cannot find a inNetwork neighbor to use as a proxy to join the network
 
     static const int routeSetupReqWaitTime = 10;    // timeout for reply to a setupReq sent
-    static const int fillVsetInterval = 5;         // time interval to check on pendingVset, purge nonEssRoutes, and do other periodic chores
-    static const int representativeMapMaxSize = 6;         // max number of reps (excluding myself) in representativeMap, NOTE can include expired records
+    static const int fillVsetInterval = 3;         // time interval to check on pendingVset, purge nonEssRoutes, and do other periodic chores
+    static const int inNetworkWarmupTime = 5;
+    static const double nonEssRouteExpiration; 
 
     int setupReqRetryLimit;   // only used for lost vnei
     static const int routePrevhopVidsSize = 2;     // max number of prevhopVids recorded for a route in routing table, including prevhop itself, related to repairLinkReqFloodTTL depending on physical topo
-    static const bool checkUniPacketHopcountLimit = false;
+    static const bool checkUniPacketHopcountLimit = true;
     static const int uniPacketHopcountLimit = 10000;     // max number of hops a unicast packet can traverse, if msgHopcount (including myself) >= uniPacketHopcountLimit, I won't forward the packet
 
     bool sendRepairLocalNoTemp;           // whether to send out repairLocalReply instead of tearing down broken vroutes directly
@@ -57,9 +59,10 @@ class Vrr : public RoutingBase
 
     // statistics measurement
     bool sendTestPacket;
-    static const int testSendInterval = 10;         // time interval to send a test message for statistics measurement
-    static const bool recordReceivedMsg = true;          // record received message (may not be directed to me) with recordMessageRecord(/*action=*/2
-    static const bool recordDroppedMsg = false;          // record message arrived and destined for me, or dropped at me with recordMessageRecord(/*action=*/1 or 4
+    bool recordStatsToFile = true;   // record node and messages statistics to file
+    static const int testSendInterval = 5;         // time interval to send a test message for statistics measurement
+    bool recordReceivedMsg;          // record received message (may not be directed to me) with recordMessageRecord(/*action=*/2
+    bool recordDroppedMsg;          // record message arrived and destined for me, or dropped at me with recordMessageRecord(/*action=*/1 or 4
     unsigned int numTestPacketReceived = 0;       // number of test messages received (handled or forwarded)
 
     // time to start sending TestPacket
@@ -87,6 +90,9 @@ class Vrr : public RoutingBase
     // Representative representative; // later in initialization will set representative.vid (either fixed or myself) as needed
     unsigned int selfRepSeqnum;       // rep seqNo when I'm rep
     std::map<VlrRingVID, Representative> representativeMap;   // doesn't include myself
+    static const int representativeMapMaxSize = 10000;         // max number of reps (excluding myself) in representativeMap, NOTE can include expired records
+    int representativeMapActualMaxSize = 0;         // max number of reps (excluding myself) that have coexisted in representativeMap
+    
     unsigned int totalNumBeaconSent = 0;
 
     int vsetHalfCardinality;
@@ -116,6 +122,7 @@ class Vrr : public RoutingBase
     virtual void processFailedPacket(cPacket *packet, unsigned int pneiVid) override;
     virtual void writeRoutingTableToFile() override;
     virtual void recordCurrentNodeStats(const char *stage) override;
+    virtual std::set<VlrRingVID> convertVsetToSet() const override;
 
     // handling messages
     void processSelfMessage(cMessage *message);
@@ -153,7 +160,7 @@ class Vrr : public RoutingBase
     virtual void processBeacon(VlrIntBeacon *beacon, bool& pktForwarded);
     // void handleNewPnei(const VlrRingVID& pneiVid);
     void handleLinkedPnei(const VlrRingVID& pneiVid);
-    void updateRepState(VlrRingVID pnei, const VlrIntRepState& pneiRepState, bool pneiIsLinked);
+    void updateRepState(VlrRingVID pnei, const VlrIntRepState& pneiRepState, bool pneiIsLinked, const VlrRingVID& pneiOtherRepVid);
 
     // handling SetupReq
     /** SetupReq timeout, resend setupReq if needed */
@@ -180,7 +187,7 @@ class Vrr : public RoutingBase
 
     // handling Teardown
     /** remove newPathid from vlrRoutingTable, send Teardown to its prevhopVid, nexthopVid and msgPrevHopVid */
-    void vrrTeardownPath(VlrPathID newPathid, VlrRingVID msgPrevHopVid, bool addSrcVset, bool checkMeEndpoint);
+    void vrrTeardownPath(VlrPathID newPathid, VlrRingVID msgPrevHopVid, bool addSrcVset, bool checkMeEndpoint, const char *infoStr="");
     TeardownInt* createTeardown(const VlrPathID& pathid, bool addSrcVset);
     void sendCreatedTeardown(TeardownInt *msg, VlrRingVID nextHopPnei, double delay=0);
     void processTeardown(TeardownInt* msgIncoming, bool& pktForwarded);
@@ -238,9 +245,11 @@ class Vrr : public RoutingBase
     void cancelPendingVsetTimers();
     void cancelRepairLinkTimers();
     void clearState();
-    std::set<VlrRingVID> convertVsetToSet() const;
     /** print vset for EV_INFO purpose */
     std::string printVsetToString() const;
+    std::string printPendingVsetToString() const;
+    std::string printRepresentativeMapToString() const;
+    std::string printVlrOptionToString(const VlrIntOption& vlrOption) const;
     std::string printRoutesToMeToString() const;
 };
 

@@ -99,7 +99,11 @@ class VlrRingRoutingTable
     friend std::ostream& operator<< (std::ostream& o, const VlrRingRoute& r) {
         o << "{ ";
         o << "from:" << r.fromVid << ", to:" << r.toVid << ", prev:" << r.prevhopVid << ", next:" << r.nexthopVid << ", isVsetRoute:" << r.isVsetRoute << ", isUnavailable:" << (int)r.isUnavailable;
-        o << " }";
+        o << ", prevhopVid: [";
+        for (const auto& vid : r.prevhopVids)
+            o << vid << " ";
+        o << "]";
+        o << "}";
         return o;
     }
 

@@ -29,6 +29,7 @@ simple Vlr extends RoutingBase
         double neighborValidityInterval @unit(s) = default(5 * beaconInterval);
         // // double pneiDiscoveryTime @unit(s) = default(3 * beaconInterval);
         double repSeqValidityInterval @unit(s) = default(6 * beaconInterval);
+        double repSeqPersistenceInterval @unit(s) = default(200 * beaconInterval);
         double inNetworkEmptyVsetWarmupTime @unit(s) = default(6 * beaconInterval);
         
         int setupReqRetryLimit = default(4);        // number of times to resend a setupReq
@@ -56,10 +57,15 @@ simple Vlr extends RoutingBase
 
         // statistics measurement
         bool sendTestPacket = default(true);	// send test messages for hop count measurement purpose
+        bool recordReceivedMsg = default(true);	// record received message (may not be directed to me) with recordMessageRecord(/*action=*/2
+        bool recordDroppedMsg = default(false);	// should be different than recordReceivedMsg, record message arrived and destined for me, or dropped at me with recordMessageRecord(/*action=*/1 or 4
 
         int simulationSeed = default(0);
         string firstRepSeqTimeoutCSVFile = default("");    // if provided, first repSeq timeout will be written to file
         string totalNumBeacomSentCSVFile = default("");    // if provided, totalNumBeaconSent will be written to file at end of simulation
+        double totalNumBeacomSentWriteTime = default(0);       // if > 0, only record totalNumBeaconSent and totalNumRepSeqTimeout in time range (0, totalNumBeacomSentWriteTime)
+        bool repFixedEarlyBeaconOnNewRepSeqNum = default(true); // if representativeFixed=true, enable to send early beacon upon receiving a new rep seqNo if rep seqNo wasn't updated in my previous beacon, this is to deal with misalignment of beacon times btw rep parent and child
+        string repBeaconExcludeOldRepSeqNum = default("");     // "true" or "false", default "": false; enable to exclude rep seqNo that wasn't updated in previous beaconInterval, this is to ensure rep expiration times btw rep parent and child shouldn't differ by more than beaconInterval
 
         // visualization parameters
         bool displayBubbles = default(false);	// display bubble messages about routing state for packets

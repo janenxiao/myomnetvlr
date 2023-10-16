@@ -78,6 +78,21 @@ void NetBuilder::connect(cGate *src, cGate *dest, double delay, double ber, doub
 
 void NetBuilder::buildNetwork(cModule *parent)
 {
+    const char *routingConfigTypename = par("routingConfiguratorType");
+    if (strlen(routingConfigTypename) > 0) {
+        char name[25] = "routingConfigurator";
+        EV << "RoutingConfigurator name=" << name << " type=" << routingConfigTypename << "\n";
+
+        // create module
+        cModuleType *modtype = cModuleType::find(routingConfigTypename);
+        if (!modtype)
+            throw cRuntimeError("module type `%s' for node `%s' not found", routingConfigTypename, name);
+        cModule *mod = modtype->create(name, parent);
+
+        // read params from the ini file, etc
+        mod->finalizeParameters();
+    }
+
     std::map<long, cModule *> nodeid2mod;
     std::string line;
 

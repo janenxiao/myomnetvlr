@@ -9351,6 +9351,423 @@ void RepairLinkReplyIntDescriptor::setFieldStructValuePointer(omnetpp::any_ptr o
     }
 }
 
+Register_Class(RepairLinkFailInt)
+
+RepairLinkFailInt::RepairLinkFailInt(const char *name) : ::omnetvlr::VlrIntSetupPacket(name)
+{
+}
+
+RepairLinkFailInt::RepairLinkFailInt(const RepairLinkFailInt& other) : ::omnetvlr::VlrIntSetupPacket(other)
+{
+    copy(other);
+}
+
+RepairLinkFailInt::~RepairLinkFailInt()
+{
+}
+
+RepairLinkFailInt& RepairLinkFailInt::operator=(const RepairLinkFailInt& other)
+{
+    if (this == &other) return *this;
+    ::omnetvlr::VlrIntSetupPacket::operator=(other);
+    copy(other);
+    return *this;
+}
+
+void RepairLinkFailInt::copy(const RepairLinkFailInt& other)
+{
+    this->dst = other.dst;
+    this->src = other.src;
+    this->brokenPathids = other.brokenPathids;
+    this->tempPathid = other.tempPathid;
+}
+
+void RepairLinkFailInt::parsimPack(omnetpp::cCommBuffer *b) const
+{
+    ::omnetvlr::VlrIntSetupPacket::parsimPack(b);
+    doParsimPacking(b,this->dst);
+    doParsimPacking(b,this->src);
+    doParsimPacking(b,this->brokenPathids);
+    doParsimPacking(b,this->tempPathid);
+}
+
+void RepairLinkFailInt::parsimUnpack(omnetpp::cCommBuffer *b)
+{
+    ::omnetvlr::VlrIntSetupPacket::parsimUnpack(b);
+    doParsimUnpacking(b,this->dst);
+    doParsimUnpacking(b,this->src);
+    doParsimUnpacking(b,this->brokenPathids);
+    doParsimUnpacking(b,this->tempPathid);
+}
+
+unsigned int RepairLinkFailInt::getDst() const
+{
+    return this->dst;
+}
+
+void RepairLinkFailInt::setDst(unsigned int dst)
+{
+    this->dst = dst;
+}
+
+unsigned int RepairLinkFailInt::getSrc() const
+{
+    return this->src;
+}
+
+void RepairLinkFailInt::setSrc(unsigned int src)
+{
+    this->src = src;
+}
+
+const VlrIntVidVec& RepairLinkFailInt::getBrokenPathids() const
+{
+    return this->brokenPathids;
+}
+
+void RepairLinkFailInt::setBrokenPathids(const VlrIntVidVec& brokenPathids)
+{
+    this->brokenPathids = brokenPathids;
+}
+
+const VlrPathID& RepairLinkFailInt::getTempPathid() const
+{
+    return this->tempPathid;
+}
+
+void RepairLinkFailInt::setTempPathid(const VlrPathID& tempPathid)
+{
+    this->tempPathid = tempPathid;
+}
+
+class RepairLinkFailIntDescriptor : public omnetpp::cClassDescriptor
+{
+  private:
+    mutable const char **propertyNames;
+    enum FieldConstants {
+        FIELD_dst,
+        FIELD_src,
+        FIELD_brokenPathids,
+        FIELD_tempPathid,
+    };
+  public:
+    RepairLinkFailIntDescriptor();
+    virtual ~RepairLinkFailIntDescriptor();
+
+    virtual bool doesSupport(omnetpp::cObject *obj) const override;
+    virtual const char **getPropertyNames() const override;
+    virtual const char *getProperty(const char *propertyName) const override;
+    virtual int getFieldCount() const override;
+    virtual const char *getFieldName(int field) const override;
+    virtual int findField(const char *fieldName) const override;
+    virtual unsigned int getFieldTypeFlags(int field) const override;
+    virtual const char *getFieldTypeString(int field) const override;
+    virtual const char **getFieldPropertyNames(int field) const override;
+    virtual const char *getFieldProperty(int field, const char *propertyName) const override;
+    virtual int getFieldArraySize(omnetpp::any_ptr object, int field) const override;
+    virtual void setFieldArraySize(omnetpp::any_ptr object, int field, int size) const override;
+
+    virtual const char *getFieldDynamicTypeString(omnetpp::any_ptr object, int field, int i) const override;
+    virtual std::string getFieldValueAsString(omnetpp::any_ptr object, int field, int i) const override;
+    virtual void setFieldValueAsString(omnetpp::any_ptr object, int field, int i, const char *value) const override;
+    virtual omnetpp::cValue getFieldValue(omnetpp::any_ptr object, int field, int i) const override;
+    virtual void setFieldValue(omnetpp::any_ptr object, int field, int i, const omnetpp::cValue& value) const override;
+
+    virtual const char *getFieldStructName(int field) const override;
+    virtual omnetpp::any_ptr getFieldStructValuePointer(omnetpp::any_ptr object, int field, int i) const override;
+    virtual void setFieldStructValuePointer(omnetpp::any_ptr object, int field, int i, omnetpp::any_ptr ptr) const override;
+};
+
+Register_ClassDescriptor(RepairLinkFailIntDescriptor)
+
+RepairLinkFailIntDescriptor::RepairLinkFailIntDescriptor() : omnetpp::cClassDescriptor(omnetpp::opp_typename(typeid(omnetvlr::RepairLinkFailInt)), "omnetvlr::VlrIntSetupPacket")
+{
+    propertyNames = nullptr;
+}
+
+RepairLinkFailIntDescriptor::~RepairLinkFailIntDescriptor()
+{
+    delete[] propertyNames;
+}
+
+bool RepairLinkFailIntDescriptor::doesSupport(omnetpp::cObject *obj) const
+{
+    return dynamic_cast<RepairLinkFailInt *>(obj)!=nullptr;
+}
+
+const char **RepairLinkFailIntDescriptor::getPropertyNames() const
+{
+    if (!propertyNames) {
+        static const char *names[] = {  nullptr };
+        omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
+        const char **baseNames = base ? base->getPropertyNames() : nullptr;
+        propertyNames = mergeLists(baseNames, names);
+    }
+    return propertyNames;
+}
+
+const char *RepairLinkFailIntDescriptor::getProperty(const char *propertyName) const
+{
+    omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
+    return base ? base->getProperty(propertyName) : nullptr;
+}
+
+int RepairLinkFailIntDescriptor::getFieldCount() const
+{
+    omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
+    return base ? 4+base->getFieldCount() : 4;
+}
+
+unsigned int RepairLinkFailIntDescriptor::getFieldTypeFlags(int field) const
+{
+    omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
+    if (base) {
+        if (field < base->getFieldCount())
+            return base->getFieldTypeFlags(field);
+        field -= base->getFieldCount();
+    }
+    static unsigned int fieldTypeFlags[] = {
+        FD_ISEDITABLE,    // FIELD_dst
+        FD_ISEDITABLE,    // FIELD_src
+        FD_ISCOMPOUND,    // FIELD_brokenPathids
+        0,    // FIELD_tempPathid
+    };
+    return (field >= 0 && field < 4) ? fieldTypeFlags[field] : 0;
+}
+
+const char *RepairLinkFailIntDescriptor::getFieldName(int field) const
+{
+    omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
+    if (base) {
+        if (field < base->getFieldCount())
+            return base->getFieldName(field);
+        field -= base->getFieldCount();
+    }
+    static const char *fieldNames[] = {
+        "dst",
+        "src",
+        "brokenPathids",
+        "tempPathid",
+    };
+    return (field >= 0 && field < 4) ? fieldNames[field] : nullptr;
+}
+
+int RepairLinkFailIntDescriptor::findField(const char *fieldName) const
+{
+    omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
+    int baseIndex = base ? base->getFieldCount() : 0;
+    if (strcmp(fieldName, "dst") == 0) return baseIndex + 0;
+    if (strcmp(fieldName, "src") == 0) return baseIndex + 1;
+    if (strcmp(fieldName, "brokenPathids") == 0) return baseIndex + 2;
+    if (strcmp(fieldName, "tempPathid") == 0) return baseIndex + 3;
+    return base ? base->findField(fieldName) : -1;
+}
+
+const char *RepairLinkFailIntDescriptor::getFieldTypeString(int field) const
+{
+    omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
+    if (base) {
+        if (field < base->getFieldCount())
+            return base->getFieldTypeString(field);
+        field -= base->getFieldCount();
+    }
+    static const char *fieldTypeStrings[] = {
+        "unsigned int",    // FIELD_dst
+        "unsigned int",    // FIELD_src
+        "omnetvlr::VlrIntVidVec",    // FIELD_brokenPathids
+        "omnetvlr::VlrPathID",    // FIELD_tempPathid
+    };
+    return (field >= 0 && field < 4) ? fieldTypeStrings[field] : nullptr;
+}
+
+const char **RepairLinkFailIntDescriptor::getFieldPropertyNames(int field) const
+{
+    omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
+    if (base) {
+        if (field < base->getFieldCount())
+            return base->getFieldPropertyNames(field);
+        field -= base->getFieldCount();
+    }
+    switch (field) {
+        default: return nullptr;
+    }
+}
+
+const char *RepairLinkFailIntDescriptor::getFieldProperty(int field, const char *propertyName) const
+{
+    omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
+    if (base) {
+        if (field < base->getFieldCount())
+            return base->getFieldProperty(field, propertyName);
+        field -= base->getFieldCount();
+    }
+    switch (field) {
+        default: return nullptr;
+    }
+}
+
+int RepairLinkFailIntDescriptor::getFieldArraySize(omnetpp::any_ptr object, int field) const
+{
+    omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
+    if (base) {
+        if (field < base->getFieldCount())
+            return base->getFieldArraySize(object, field);
+        field -= base->getFieldCount();
+    }
+    RepairLinkFailInt *pp = omnetpp::fromAnyPtr<RepairLinkFailInt>(object); (void)pp;
+    switch (field) {
+        default: return 0;
+    }
+}
+
+void RepairLinkFailIntDescriptor::setFieldArraySize(omnetpp::any_ptr object, int field, int size) const
+{
+    omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
+    if (base) {
+        if (field < base->getFieldCount()){
+            base->setFieldArraySize(object, field, size);
+            return;
+        }
+        field -= base->getFieldCount();
+    }
+    RepairLinkFailInt *pp = omnetpp::fromAnyPtr<RepairLinkFailInt>(object); (void)pp;
+    switch (field) {
+        default: throw omnetpp::cRuntimeError("Cannot set array size of field %d of class 'RepairLinkFailInt'", field);
+    }
+}
+
+const char *RepairLinkFailIntDescriptor::getFieldDynamicTypeString(omnetpp::any_ptr object, int field, int i) const
+{
+    omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
+    if (base) {
+        if (field < base->getFieldCount())
+            return base->getFieldDynamicTypeString(object,field,i);
+        field -= base->getFieldCount();
+    }
+    RepairLinkFailInt *pp = omnetpp::fromAnyPtr<RepairLinkFailInt>(object); (void)pp;
+    switch (field) {
+        default: return nullptr;
+    }
+}
+
+std::string RepairLinkFailIntDescriptor::getFieldValueAsString(omnetpp::any_ptr object, int field, int i) const
+{
+    omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
+    if (base) {
+        if (field < base->getFieldCount())
+            return base->getFieldValueAsString(object,field,i);
+        field -= base->getFieldCount();
+    }
+    RepairLinkFailInt *pp = omnetpp::fromAnyPtr<RepairLinkFailInt>(object); (void)pp;
+    switch (field) {
+        case FIELD_dst: return ulong2string(pp->getDst());
+        case FIELD_src: return ulong2string(pp->getSrc());
+        case FIELD_brokenPathids: return "";
+        case FIELD_tempPathid: return ulong2string(pp->getTempPathid());
+        default: return "";
+    }
+}
+
+void RepairLinkFailIntDescriptor::setFieldValueAsString(omnetpp::any_ptr object, int field, int i, const char *value) const
+{
+    omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
+    if (base) {
+        if (field < base->getFieldCount()){
+            base->setFieldValueAsString(object, field, i, value);
+            return;
+        }
+        field -= base->getFieldCount();
+    }
+    RepairLinkFailInt *pp = omnetpp::fromAnyPtr<RepairLinkFailInt>(object); (void)pp;
+    switch (field) {
+        case FIELD_dst: pp->setDst(string2ulong(value)); break;
+        case FIELD_src: pp->setSrc(string2ulong(value)); break;
+        default: throw omnetpp::cRuntimeError("Cannot set field %d of class 'RepairLinkFailInt'", field);
+    }
+}
+
+omnetpp::cValue RepairLinkFailIntDescriptor::getFieldValue(omnetpp::any_ptr object, int field, int i) const
+{
+    omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
+    if (base) {
+        if (field < base->getFieldCount())
+            return base->getFieldValue(object,field,i);
+        field -= base->getFieldCount();
+    }
+    RepairLinkFailInt *pp = omnetpp::fromAnyPtr<RepairLinkFailInt>(object); (void)pp;
+    switch (field) {
+        case FIELD_dst: return (omnetpp::intval_t)(pp->getDst());
+        case FIELD_src: return (omnetpp::intval_t)(pp->getSrc());
+        case FIELD_brokenPathids: return omnetpp::toAnyPtr(&pp->getBrokenPathids()); break;
+        case FIELD_tempPathid: return omnetpp::toAnyPtr(&pp->getTempPathid()); break;
+        default: throw omnetpp::cRuntimeError("Cannot return field %d of class 'RepairLinkFailInt' as cValue -- field index out of range?", field);
+    }
+}
+
+void RepairLinkFailIntDescriptor::setFieldValue(omnetpp::any_ptr object, int field, int i, const omnetpp::cValue& value) const
+{
+    omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
+    if (base) {
+        if (field < base->getFieldCount()){
+            base->setFieldValue(object, field, i, value);
+            return;
+        }
+        field -= base->getFieldCount();
+    }
+    RepairLinkFailInt *pp = omnetpp::fromAnyPtr<RepairLinkFailInt>(object); (void)pp;
+    switch (field) {
+        case FIELD_dst: pp->setDst(omnetpp::checked_int_cast<unsigned int>(value.intValue())); break;
+        case FIELD_src: pp->setSrc(omnetpp::checked_int_cast<unsigned int>(value.intValue())); break;
+        default: throw omnetpp::cRuntimeError("Cannot set field %d of class 'RepairLinkFailInt'", field);
+    }
+}
+
+const char *RepairLinkFailIntDescriptor::getFieldStructName(int field) const
+{
+    omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
+    if (base) {
+        if (field < base->getFieldCount())
+            return base->getFieldStructName(field);
+        field -= base->getFieldCount();
+    }
+    switch (field) {
+        case FIELD_brokenPathids: return omnetpp::opp_typename(typeid(VlrIntVidVec));
+        default: return nullptr;
+    };
+}
+
+omnetpp::any_ptr RepairLinkFailIntDescriptor::getFieldStructValuePointer(omnetpp::any_ptr object, int field, int i) const
+{
+    omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
+    if (base) {
+        if (field < base->getFieldCount())
+            return base->getFieldStructValuePointer(object, field, i);
+        field -= base->getFieldCount();
+    }
+    RepairLinkFailInt *pp = omnetpp::fromAnyPtr<RepairLinkFailInt>(object); (void)pp;
+    switch (field) {
+        case FIELD_brokenPathids: return omnetpp::toAnyPtr(&pp->getBrokenPathids()); break;
+        case FIELD_tempPathid: return omnetpp::toAnyPtr(&pp->getTempPathid()); break;
+        default: return omnetpp::any_ptr(nullptr);
+    }
+}
+
+void RepairLinkFailIntDescriptor::setFieldStructValuePointer(omnetpp::any_ptr object, int field, int i, omnetpp::any_ptr ptr) const
+{
+    omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
+    if (base) {
+        if (field < base->getFieldCount()){
+            base->setFieldStructValuePointer(object, field, i, ptr);
+            return;
+        }
+        field -= base->getFieldCount();
+    }
+    RepairLinkFailInt *pp = omnetpp::fromAnyPtr<RepairLinkFailInt>(object); (void)pp;
+    switch (field) {
+        default: throw omnetpp::cRuntimeError("Cannot set field %d of class 'RepairLinkFailInt'", field);
+    }
+}
+
 Register_Class(RepairRouteInt)
 
 RepairRouteInt::RepairRouteInt(const char *name) : ::omnetvlr::VlrIntSetupPacket(name)
@@ -9821,7 +10238,9 @@ void NotifyVsetInt::copy(const NotifyVsetInt& other)
 {
     this->dst = other.dst;
     this->src = other.src;
+    this->proxy = other.proxy;
     this->toVnei = other.toVnei;
+    this->trace = other.trace;
 }
 
 void NotifyVsetInt::parsimPack(omnetpp::cCommBuffer *b) const
@@ -9829,7 +10248,9 @@ void NotifyVsetInt::parsimPack(omnetpp::cCommBuffer *b) const
     ::omnetvlr::VlrIntSetupPacket::parsimPack(b);
     doParsimPacking(b,this->dst);
     doParsimPacking(b,this->src);
+    doParsimPacking(b,this->proxy);
     doParsimPacking(b,this->toVnei);
+    doParsimPacking(b,this->trace);
 }
 
 void NotifyVsetInt::parsimUnpack(omnetpp::cCommBuffer *b)
@@ -9837,7 +10258,9 @@ void NotifyVsetInt::parsimUnpack(omnetpp::cCommBuffer *b)
     ::omnetvlr::VlrIntSetupPacket::parsimUnpack(b);
     doParsimUnpacking(b,this->dst);
     doParsimUnpacking(b,this->src);
+    doParsimUnpacking(b,this->proxy);
     doParsimUnpacking(b,this->toVnei);
+    doParsimUnpacking(b,this->trace);
 }
 
 unsigned int NotifyVsetInt::getDst() const
@@ -9860,6 +10283,16 @@ void NotifyVsetInt::setSrc(unsigned int src)
     this->src = src;
 }
 
+unsigned int NotifyVsetInt::getProxy() const
+{
+    return this->proxy;
+}
+
+void NotifyVsetInt::setProxy(unsigned int proxy)
+{
+    this->proxy = proxy;
+}
+
 bool NotifyVsetInt::getToVnei() const
 {
     return this->toVnei;
@@ -9870,6 +10303,16 @@ void NotifyVsetInt::setToVnei(bool toVnei)
     this->toVnei = toVnei;
 }
 
+const VlrIntVidVec& NotifyVsetInt::getTrace() const
+{
+    return this->trace;
+}
+
+void NotifyVsetInt::setTrace(const VlrIntVidVec& trace)
+{
+    this->trace = trace;
+}
+
 class NotifyVsetIntDescriptor : public omnetpp::cClassDescriptor
 {
   private:
@@ -9877,7 +10320,9 @@ class NotifyVsetIntDescriptor : public omnetpp::cClassDescriptor
     enum FieldConstants {
         FIELD_dst,
         FIELD_src,
+        FIELD_proxy,
         FIELD_toVnei,
+        FIELD_trace,
     };
   public:
     NotifyVsetIntDescriptor();
@@ -9944,7 +10389,7 @@ const char *NotifyVsetIntDescriptor::getProperty(const char *propertyName) const
 int NotifyVsetIntDescriptor::getFieldCount() const
 {
     omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
-    return base ? 3+base->getFieldCount() : 3;
+    return base ? 5+base->getFieldCount() : 5;
 }
 
 unsigned int NotifyVsetIntDescriptor::getFieldTypeFlags(int field) const
@@ -9958,9 +10403,11 @@ unsigned int NotifyVsetIntDescriptor::getFieldTypeFlags(int field) const
     static unsigned int fieldTypeFlags[] = {
         FD_ISEDITABLE,    // FIELD_dst
         FD_ISEDITABLE,    // FIELD_src
+        FD_ISEDITABLE,    // FIELD_proxy
         FD_ISEDITABLE,    // FIELD_toVnei
+        FD_ISCOMPOUND,    // FIELD_trace
     };
-    return (field >= 0 && field < 3) ? fieldTypeFlags[field] : 0;
+    return (field >= 0 && field < 5) ? fieldTypeFlags[field] : 0;
 }
 
 const char *NotifyVsetIntDescriptor::getFieldName(int field) const
@@ -9974,9 +10421,11 @@ const char *NotifyVsetIntDescriptor::getFieldName(int field) const
     static const char *fieldNames[] = {
         "dst",
         "src",
+        "proxy",
         "toVnei",
+        "trace",
     };
-    return (field >= 0 && field < 3) ? fieldNames[field] : nullptr;
+    return (field >= 0 && field < 5) ? fieldNames[field] : nullptr;
 }
 
 int NotifyVsetIntDescriptor::findField(const char *fieldName) const
@@ -9985,7 +10434,9 @@ int NotifyVsetIntDescriptor::findField(const char *fieldName) const
     int baseIndex = base ? base->getFieldCount() : 0;
     if (strcmp(fieldName, "dst") == 0) return baseIndex + 0;
     if (strcmp(fieldName, "src") == 0) return baseIndex + 1;
-    if (strcmp(fieldName, "toVnei") == 0) return baseIndex + 2;
+    if (strcmp(fieldName, "proxy") == 0) return baseIndex + 2;
+    if (strcmp(fieldName, "toVnei") == 0) return baseIndex + 3;
+    if (strcmp(fieldName, "trace") == 0) return baseIndex + 4;
     return base ? base->findField(fieldName) : -1;
 }
 
@@ -10000,9 +10451,11 @@ const char *NotifyVsetIntDescriptor::getFieldTypeString(int field) const
     static const char *fieldTypeStrings[] = {
         "unsigned int",    // FIELD_dst
         "unsigned int",    // FIELD_src
+        "unsigned int",    // FIELD_proxy
         "bool",    // FIELD_toVnei
+        "omnetvlr::VlrIntVidVec",    // FIELD_trace
     };
-    return (field >= 0 && field < 3) ? fieldTypeStrings[field] : nullptr;
+    return (field >= 0 && field < 5) ? fieldTypeStrings[field] : nullptr;
 }
 
 const char **NotifyVsetIntDescriptor::getFieldPropertyNames(int field) const
@@ -10087,7 +10540,9 @@ std::string NotifyVsetIntDescriptor::getFieldValueAsString(omnetpp::any_ptr obje
     switch (field) {
         case FIELD_dst: return ulong2string(pp->getDst());
         case FIELD_src: return ulong2string(pp->getSrc());
+        case FIELD_proxy: return ulong2string(pp->getProxy());
         case FIELD_toVnei: return bool2string(pp->getToVnei());
+        case FIELD_trace: return "";
         default: return "";
     }
 }
@@ -10106,6 +10561,7 @@ void NotifyVsetIntDescriptor::setFieldValueAsString(omnetpp::any_ptr object, int
     switch (field) {
         case FIELD_dst: pp->setDst(string2ulong(value)); break;
         case FIELD_src: pp->setSrc(string2ulong(value)); break;
+        case FIELD_proxy: pp->setProxy(string2ulong(value)); break;
         case FIELD_toVnei: pp->setToVnei(string2bool(value)); break;
         default: throw omnetpp::cRuntimeError("Cannot set field %d of class 'NotifyVsetInt'", field);
     }
@@ -10123,7 +10579,9 @@ omnetpp::cValue NotifyVsetIntDescriptor::getFieldValue(omnetpp::any_ptr object, 
     switch (field) {
         case FIELD_dst: return (omnetpp::intval_t)(pp->getDst());
         case FIELD_src: return (omnetpp::intval_t)(pp->getSrc());
+        case FIELD_proxy: return (omnetpp::intval_t)(pp->getProxy());
         case FIELD_toVnei: return pp->getToVnei();
+        case FIELD_trace: return omnetpp::toAnyPtr(&pp->getTrace()); break;
         default: throw omnetpp::cRuntimeError("Cannot return field %d of class 'NotifyVsetInt' as cValue -- field index out of range?", field);
     }
 }
@@ -10142,6 +10600,7 @@ void NotifyVsetIntDescriptor::setFieldValue(omnetpp::any_ptr object, int field, 
     switch (field) {
         case FIELD_dst: pp->setDst(omnetpp::checked_int_cast<unsigned int>(value.intValue())); break;
         case FIELD_src: pp->setSrc(omnetpp::checked_int_cast<unsigned int>(value.intValue())); break;
+        case FIELD_proxy: pp->setProxy(omnetpp::checked_int_cast<unsigned int>(value.intValue())); break;
         case FIELD_toVnei: pp->setToVnei(value.boolValue()); break;
         default: throw omnetpp::cRuntimeError("Cannot set field %d of class 'NotifyVsetInt'", field);
     }
@@ -10156,6 +10615,7 @@ const char *NotifyVsetIntDescriptor::getFieldStructName(int field) const
         field -= base->getFieldCount();
     }
     switch (field) {
+        case FIELD_trace: return omnetpp::opp_typename(typeid(VlrIntVidVec));
         default: return nullptr;
     };
 }
@@ -10170,6 +10630,7 @@ omnetpp::any_ptr NotifyVsetIntDescriptor::getFieldStructValuePointer(omnetpp::an
     }
     NotifyVsetInt *pp = omnetpp::fromAnyPtr<NotifyVsetInt>(object); (void)pp;
     switch (field) {
+        case FIELD_trace: return omnetpp::toAnyPtr(&pp->getTrace()); break;
         default: return omnetpp::any_ptr(nullptr);
     }
 }

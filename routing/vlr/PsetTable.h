@@ -57,6 +57,9 @@ class PsetTable
     bool pneiIsLinked(const T& vid) const;
     bool pneiIsLinkedInNetwork(const T& vid) const;
     // const L3Address& getPneiL3Address(const T& vid) const;
+    /** find gateIndex associated with vid in vidToStateMap, return -1 if vid not found in vidToStateMap */
+    int findPneiGateIndex(const T& vid) const;
+    /** get gateIndex associated with vid in vidToStateMap, throw exception if vid not found in vidToStateMap */
     int getPneiGateIndex(const T& vid) const;
     /** get pnei associated with targetGate */
     T getPneiFromGateIndex(const int& targetGate) const;
@@ -83,6 +86,7 @@ class PsetTable
 
     void removeMPneisOfPnei(const T& vid);
 
+    int findRecvNeiGateIndex(const T& vid) const;
     void setRecvNeiGateIndex(const T& vid, const int& gateIndex);
 
 
@@ -91,7 +95,8 @@ class PsetTable
         o << "{ ";
         for(auto elem : t.vidToStateMap) {
             std::string inNetStr = (elem.second.inNetwork) ? "inNet" : "noNet";
-            o << elem.first << ":(" << elem.second.state << ";" << inNetStr << elem.second.lastHeard << ") ";
+            std::string hadInNetStr = (elem.second.hadBeenInNetwork) ? "hadinNet" : "hadnoNet";
+            o << elem.first << ":(" << elem.second.state << ";" << inNetStr << ";" << hadInNetStr << elem.second.lastHeard << ") ";
         }
         o << "}";
         return o;
@@ -138,6 +143,15 @@ bool PsetTable<T>::pneiIsLinkedInNetwork(const T& vid) const
 //     ASSERT(itr != vidToStateMap.end());        // assert vid exists in vidToStateMap
 //     return itr->second.address;
 // }
+
+template <class T>
+int PsetTable<T>::findPneiGateIndex(const T& vid) const
+{
+    const auto itr = vidToStateMap.find(vid);  // itr type: std::map<T, PsetTableValue>::iterator
+    if (itr == vidToStateMap.end())            // vid doesn't exist in vidToStateMap
+        return -1;
+    return itr->second.gateIndex;
+}
 
 template <class T>
 int PsetTable<T>::getPneiGateIndex(const T& vid) const
@@ -258,6 +272,15 @@ void PsetTable<T>::removeMPneisOfPnei(const T& vid)
         }
         itr->second.mpneis.clear();
     }
+}
+
+template <class T>
+int PsetTable<T>::findRecvNeiGateIndex(const T& vid) const
+{
+    const auto itr = recvVidToGateIndexMap.find(vid);  // itr type: std::map<T, int>::iterator
+    if (itr == recvVidToGateIndexMap.end())           // vid doesn't exist in vidToStateMap
+        return -1;
+    return itr->second;
 }
 
 template <class T>

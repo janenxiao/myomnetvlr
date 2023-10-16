@@ -32,6 +32,9 @@ Vrr::~Vrr()
     cancelRepairLinkTimers();
 }
 
+// static VRR parameters -- unit: seconds
+const double Vrr::nonEssRouteExpiration = 0.1;
+
 // time to start sending TestPacket
 const double Vrr::sendTestPacketOverlayWaitTime = 100;
 double Vrr::lastTimeNodeJoinedInNetwork = 100;
@@ -78,6 +81,7 @@ void Vrr::initialize()
     maxJitter = par("maxJitter");
     neighborValidityInterval = par("neighborValidityInterval");
     repSeqValidityInterval = par("repSeqValidityInterval");
+    repSeqPersistenceInterval = par("repSeqPersistenceInterval");
     inNetworkEmptyVsetWarmupTime = par("inNetworkEmptyVsetWarmupTime");
     
     setupReqRetryLimit = par("setupReqRetryLimit");
@@ -100,6 +104,8 @@ void Vrr::initialize()
     // statistics measurement
     sendTestPacket = par("sendTestPacket");
     testPacketTimer = new cMessage("testPacketTimer");
+    recordReceivedMsg = par("recordReceivedMsg");
+    recordDroppedMsg = par("recordDroppedMsg");
 
     if (sendTestPacket) {
         initializeSelfTestDstList();
@@ -135,6 +141,8 @@ void Vrr::processSelfMessage(cMessage *message)
         processWriteRoutingTableTimer();
     else if (message == writeNodeStatsTimer)
         processWriteNodeStatsTimer();
+    else if (message == writeReceivedMsgAggTimer)
+        processWriteReceivedMsgAggTimer();
     else if (auto failedpktTimer = dynamic_cast<FailedPacketDelayTimer *>(message))
         processFailedPacketDelayTimer(failedpktTimer);
     // self-message defined in Vrr
@@ -179,7 +187,7 @@ void Vrr::processMessage(cMessage *message)
             EV_WARN << "Received VlrIntUniPacket from failed link, me=" << vid << ", selfNodeFailure=" << selfNodeFailure << ", sending NotifyLinkFailure(linkDown) back" << endl;
             sendNotifyLinkFailure(pktGateIndex, /*simLinkUp=*/false);
 
-            if (sendTestPacket && recordDroppedMsg) {   // record dropped message
+            if (recordStatsToFile && recordDroppedMsg) {   // record dropped message
                 recordMessageRecord(/*action=*/4, /*src=*/VLRRINGVID_NULL, /*dst=*/VLRRINGVID_NULL, unicastPacket->getName(), /*msgId=*/unicastPacket->getMessageId(), /*hopcount=*/unicastPacket->getHopcount(), /*chunkByteLength=*/unicastPacket->getByteLength(), /*infoStr=*/"linkfailure");
             }
         } else
@@ -190,7 +198,7 @@ void Vrr::processMessage(cMessage *message)
             VlrRingVID msgPrevHopVid = unicastPacket->getVlrOption().getPrevHopVid();
             if (msgPrevHopVid != VLRRINGVID_NULL)
                 psetTable.setRecvNeiGateIndex(msgPrevHopVid, pktGateIndex);
-        } else if (simulateBeaconLostRate > 0 && uniform(0, 1) < simulateBeaconLostRate) {  // broadcast message
+        } else if (simulateBeaconLossRate > 0 && uniform(0, 1) < simulateBeaconLossRate) {  // broadcast message
             EV_WARN << "Received broadcast packet and simulating packet loss due to collision, me=" << vid << ", ignoring packet " << message->getName() << endl;
             processPkt = false;
         }
@@ -265,11 +273,13 @@ void Vrr::handleStartOperation()
 void Vrr::handleStopOperation()
 {
     EV_DEBUG << "handleStopOperation() at node " << vid << endl;
-    if (sendTestPacket) { // write node status update
+    if (recordStatsToFile) { // write node status update
         recordNodeStatsRecord(/*infoStr=*/"beforeNodeFailure");
     }
     clearState();
     selfNodeFailure = true;
+
+    nodesVsetCorrect.erase(vid);
 }
 
 void Vrr::handleFailureNodeRestart()
@@ -279,7 +289,7 @@ void Vrr::handleFailureNodeRestart()
     NotifyLinkFailureInt *msg = createNotifyLinkFailure(/*simLinkUp=*/true);
     sendCreatedPacket(msg, /*unicast=*/false, /*outGateIndex=*/-1, /*delay=*/0, /*checkFail=*/false);
 
-    if (sendTestPacket) { // write node status update
+    if (recordStatsToFile) { // write node status update
         recordNodeStatsRecord(/*infoStr=*/"beforeNodeRestart");
     }
 }
@@ -301,21 +311,24 @@ void Vrr::recordCurrentNodeStats(const char *stage)
         if (representativeMap.begin()->first < smallestRep)
             smallestRep = representativeMap.begin()->first;            
 
-    s << "nodeStats" << ',' << simulatedPneis << ',' << selfInNetwork << ',' 
+    s << "nodeStats" << ',' << simulatedPneis << ',' << selfInNetwork << ',' << selfNodeFailure << ',' 
             << smallestRep << ',' << printVsetToString() << ',' << vidRingRegVset << ',' << printRoutesToMeToString() << ','
-            << simulatedPneis.size() << ',' << vset.size() << ',' << pendingVset.size() << ',' << vlrRoutingTable.vlrRoutesMap.size() << ',' << totalNumBeaconSent << ',' << stage;  //  << ',' << pendingVset
+            << simulatedPneis.size() << ',' << vset.size() << ',' << pendingVset.size() << ',' << vlrRoutingTable.vlrRoutesMap.size() << ',' << totalNumBeaconSent << ','
+            << representativeMap.size() << ',' << representativeMapActualMaxSize << ',' << stage;  //  << ',' << pendingVset
 
     recordNodeStatsRecord(/*infoStr=*/s.str().c_str());
 }
 
 void Vrr::finish()
 {
-    if (sendTestPacket) {
+    if (recordStatsToFile) {
         // write node statistics to file
         recordCurrentNodeStats(/*stage=*/"finish");
         writeToResultNodeFile();
 
         // write send records file
+        if (!receivedMsgAggregate.empty())    // if there are received messages not recorded in allSendRecords yet
+            writeReceivedMsgAggToRecords();
         if (!allSendRecords.empty())
             writeToResultMessageFile();
     }
@@ -401,7 +414,7 @@ void Vrr::processNotifyLinkFailure(NotifyLinkFailureInt *msgIncoming, bool& pktF
                 }
                 
             }   // if src not in pset yet, since it's added to failureSimulationPneiVidMap, we'll no longer receive any messages from src and it won't be added to pset
-            if (sendTestPacket) { // write node status update
+            if (recordStatsToFile) { // write node status update
                 std::ostringstream s;
                 s << "beforeLinkFailure" << ": " << srcVid;
                 recordNodeStatsRecord(/*infoStr=*/s.str().c_str());
@@ -412,7 +425,7 @@ void Vrr::processNotifyLinkFailure(NotifyLinkFailureInt *msgIncoming, bool& pktF
         failureSimulationPneiVidMap.erase(srcVid);
         failureSimulationUnaddedPneiVids.erase(srcVid);
         
-        if (sendTestPacket) { // write node status update
+        if (recordStatsToFile) { // write node status update
             std::ostringstream s;
             s << "beforeLinkRestart" << ": " << srcVid;
             recordNodeStatsRecord(/*infoStr=*/s.str().c_str());
@@ -687,8 +700,8 @@ void Vrr::processBeacon(VlrIntBeacon *beacon, bool& pktForwarded)
 
     psetTable.setNeighbour(pneiVid, pneiGateIndex, pneiState, pneiInNet, /*mpneis=*/linked2hopPneis);
     
-    updateRepState(pneiVid, pneiRepState, pneiCanHearMe);   // update representative
-    updateRepState(pneiVid, pneiRepState2, pneiCanHearMe);   // update representative
+    updateRepState(pneiVid, pneiRepState, pneiCanHearMe, /*pneiOtherRepVid=*/pneiRepState2.vid);   // update representative
+    updateRepState(pneiVid, pneiRepState2, pneiCanHearMe, /*pneiOtherRepVid=*/pneiRepState.vid);   // update representative
 
     // if this is a linked pnei, add 2-hop neighbours heard in beacon to overheardMPneis
     // if (pneiCanHearMe && checkOverHeardMPneis) {
@@ -699,7 +712,7 @@ void Vrr::processBeacon(VlrIntBeacon *beacon, bool& pktForwarded)
      // schedulePurgeNeighborsTimer();
 }
 
-void Vrr::updateRepState(VlrRingVID pnei, const VlrIntRepState& pneiRepState, bool pneiIsLinked) {
+void Vrr::updateRepState(VlrRingVID pnei, const VlrIntRepState& pneiRepState, bool pneiIsLinked, const VlrRingVID& pneiOtherRepVid) {
     EV_DETAIL << "Processing RepState of pnei " << pnei << ": rep = " << pneiRepState.vid << ", seqNo = " << pneiRepState.sequencenumber << ", isLinked = " << pneiIsLinked << endl;
     // if (representative.vid == vid && pneiRepState.vid > vid && pneiRepState.sequencenumber >= representative.sequencenumber) {     // my vid < received rep, ensure my seqNo is larger than received rep, so that the smallest rep in network will also have the largest seqNo
     //     // NOTE when rep expires at node A, it may not have expired at A's pnei B which heard rep from A, to avoid A adopting B's rep, node shouldn't decrement rep seqNo even after rep expires
@@ -731,6 +744,17 @@ void Vrr::updateRepState(VlrRingVID pnei, const VlrIntRepState& pneiRepState, bo
                     repMapUpdated = true;
                 }
             }
+            if (repMapUpdated) {    // added pneiRepVid to representativeMap
+                auto erasedRepItr = expiredErasedReps.find(pneiRepVid);
+                if (erasedRepItr != expiredErasedReps.end() && erasedRepItr->second >= pneiRepState.sequencenumber) {     // pneiRepVid was removed from representativeMap but now added back with an old seqNo
+                    std::ostringstream s;
+                    s << "Error: added old rep=" << pneiRepVid << ", old seqNo=" << erasedRepItr->second << ", new seqNo=" << pneiRepState.sequencenumber << ", heard from pnei=" << pnei;
+                    recordNodeStatsRecord(/*infoStr=*/s.str().c_str());
+                    // search "Error" in all nodeStats files: grep --include=*nodeStats*.csv -irnwl "." -e "Error"
+                }
+                if (representativeMap.size() > representativeMapActualMaxSize)
+                    representativeMapActualMaxSize = representativeMap.size();
+            }
         } else {    // pneiRepVid already in representativeMap
             if (pneiRepState.sequencenumber > repMapItr->second.sequencenumber) {   // received a larger seqNo for pneiRepVid
                 repMapUpdated = true;
@@ -761,10 +785,13 @@ void Vrr::updateRepState(VlrRingVID pnei, const VlrIntRepState& pneiRepState, bo
 
             // add representative to pendingVset, always needed to repair partition
             if (selfInNetwork) {
-                auto addResult = shouldAddVnei(pneiRepVid);
-                bool& shouldAdd = std::get<0>(addResult);  // access first element in tuple
-                if (shouldAdd)
-                    pendingVsetAdd(pneiRepVid, /*numTrials=*/1, /*heardRep=*/true);
+                // only send setup to a rep if the beacon contains two reps and this is the larger rep (from VRR paper)
+                if (pneiOtherRepVid != VLRRINGVID_NULL && pneiRepVid > pneiOtherRepVid) {   // other rep is valid and not myself
+                    auto addResult = shouldAddVnei(pneiRepVid);
+                    bool& shouldAdd = std::get<0>(addResult);  // access first element in tuple
+                    if (shouldAdd)
+                        pendingVsetAdd(pneiRepVid, /*numTrials=*/1, /*heardRep=*/true);
+                }
             }
 
             EV_INFO << "Representative heard from pnei " << pnei << ": " << pneiRepVid << endl;
@@ -852,7 +879,8 @@ void Vrr::handleLostPneis(const std::vector<VlrRingVID>& pneiVids)    // const s
                     // // if route fromVid is no longer an available endpoint, add it to recentUnavailableRouteEnd to leave time for repair
                     // if (!vlrRoutingTable.findAvailableRouteEndInEndpointMap(vrouteItr->second.fromVid))
                     //     recentUnavailableRouteEnd.insert({vrouteItr->second.fromVid, {oldPathid, simTime() + recentUnavailableRouteEndExpiration}});
-                } else {    // route nexthop == lost pnei
+                }
+                if (vrouteItr->second.nexthopVid == pneiVid) {    // route nexthop == lost pnei
                     // set route nexthop unavailable
                     vlrRoutingTable.setRouteItrPrevNextIsUnavailable(vrouteItr, /*setPrev=*/false, /*value=*/1);
                     if (removeBrokenVrouteEndpointInRepair)
@@ -909,7 +937,7 @@ void Vrr::handleLostPneis(const std::vector<VlrRingVID>& pneiVids)    // const s
 //     // a valid rep seqNo timed out
 //     EV_DEBUG << "Processing repExpirationTimer at node " << vid << ", representative " << representative << " expired" << endl;
     
-//     if (sendTestPacket) { // write node status update
+//     if (recordStatsToFile) { // write node status update
 //         recordNodeStatsRecord(/*infoStr=*/"rootLost");   // unused params (stage)
 //     }
 
@@ -945,10 +973,10 @@ void Vrr::processInNetworkWarmupTimer()
         }
         if (allowInNetwork) {    // either vset isn't empty or I have no scheduled setupReq to send
             selfInNetwork = true;
-            // vset likely empty
+            // vset likely unfull
             EV_WARN << "selfInNetwork warm-up time is over, setting inNetwork = " << selfInNetwork << " with vset = " << printVsetToString() << endl;
 
-            if (sendTestPacket) { // write node status update
+            if (recordStatsToFile) { // write node status update
                 std::ostringstream s;
                 s << "inNetwork=" << selfInNetwork << " vset=" << printVsetToString() << " vsetSize=" << vset.size();
                 recordNodeStatsRecord(/*infoStr=*/s.str().c_str());   // unused params (stage)
@@ -983,7 +1011,7 @@ void Vrr::processNonEssRouteTeardownTimer()
                 const auto& teardownOut = createTeardown(/*pathid=*/oldPathid, /*addSrcVset=*/true);
                 sendCreatedTeardown(teardownOut, /*nextHopPnei=*/nextHopVid);
 
-                if (sendTestPacket) {   // record sent message
+                if (recordStatsToFile) {   // record sent message
                     recordMessageRecord(/*action=*/0, /*src=*/vid, /*dst=*/otherEnd, "Teardown", /*msgId=*/0, /*hopcount=*/0, /*chunkByteLength=*/0, /*infoStr=*/"nonEssRoutes");   // unused params (msgId, hopcount, chunkByteLength) are just assigned to 0
                 }
             } else {  // next hop is unavailable, remove this vroute from lostPneis.brokenVroutes
@@ -999,7 +1027,7 @@ void Vrr::processNonEssRouteTeardownTimer()
 void Vrr::processFailedPacket(cPacket *packet, unsigned int pneiVid)
 {
     VlrIntUniPacket *unicastPacket = check_and_cast<VlrIntUniPacket *>(packet);
-    if (sendTestPacket && recordDroppedMsg) {   // record dropped message
+    if (recordStatsToFile && recordDroppedMsg) {   // record dropped message
         recordMessageRecord(/*action=*/4, /*src=*/VLRRINGVID_NULL, /*dst=*/VLRRINGVID_NULL, unicastPacket->getName(), /*msgId=*/unicastPacket->getMessageId(), /*hopcount=*/unicastPacket->getHopcount(), /*chunkByteLength=*/unicastPacket->getByteLength(), /*infoStr=*/"linkfailure");
     }
     // VlrRingVID pneiVid = psetTable.getPneiFromGateIndex(failedGateIndex);
@@ -1042,7 +1070,7 @@ void Vrr::handleFailureLinkSimulation(const std::set<unsigned int>& failedPneis,
         if (addedToFailurePneiVidMap) {
             failureSimulationUnaddedPneiVids.erase(srcVid);
             
-            if (sendTestPacket) { // write node status update
+            if (recordStatsToFile) { // write node status update
                 std::ostringstream s;
                 s << "beforeLinkFailure" << ": " << srcVid;
                 recordNodeStatsRecord(/*infoStr=*/s.str().c_str());
@@ -1068,7 +1096,7 @@ void Vrr::handleFailureLinkRestart(const std::set<unsigned int>& restartPneis)
         } else  // pnei not in failureSimulationPneiVidMap
             failureSimulationUnaddedPneiVids.erase(pnei);
     }
-    if (sendTestPacket) { // write node status update
+    if (recordStatsToFile) { // write node status update
         std::ostringstream s;
         s << "beforeLinkRestart" << ": " << restartPneis;
         recordNodeStatsRecord(/*infoStr=*/s.str().c_str());
@@ -1239,7 +1267,7 @@ void Vrr::processWaitSetupReqTimer(WaitSetupReqIntTimer *setupReqTimer)
                     EV_INFO << "Sending SetupReply to rep = " << newnode << " using rep path, src = " << vid << ", pathid = " << newPathid << ", proxy = " << replyOutgoing->getProxy() << ", nexthop: " << nextHopVid << endl;
                     sendCreatedSetupReply(replyOutgoing, /*outGateIndex=*/psetTable.getPneiGateIndex(nextHopVid));
 
-                    if (sendTestPacket) {   // record sent message
+                    if (recordStatsToFile) {   // record sent message
                         recordMessageRecord(/*action=*/0, /*src=*/vid, /*dst=*/newnode, "SetupReply", /*msgId=*/0, /*hopcount=*/0, /*chunkByteLength=*/0, /*infoStr=*/"setup to rep");
                     }
 
@@ -1266,7 +1294,7 @@ void Vrr::processWaitSetupReqTimer(WaitSetupReqIntTimer *setupReqTimer)
         if (!setupReqSent) {     // if setupReq can't be sent, increment retryCount so we may send a setupReqTrace later
             int nextRetryCount = retryCount + 1;
             setupReqTimer->setRetryCount(nextRetryCount);
-            EV_WARN << "No next hop found to send setupReq at me = " << vid << " on WaitSetupReqTimer retryCount = " << retryCount << ", rescheduling setupReq timer to dst = " << targetVid << ", new retryCount = " << nextRetryCount << endl;
+            EV_INFO << "No next hop found to send setupReq at me = " << vid << " on WaitSetupReqTimer retryCount = " << retryCount << ", rescheduling setupReq timer to dst = " << targetVid << ", new retryCount = " << nextRetryCount << endl;
             if (nextRetryCount >= setupReqRetryLimit)   // no more setupReq trials, can remove this WaitSetupReqTimer now
                 scheduleAt(simTime(), setupReqTimer);
             else    // give some time before another setupReq trial
@@ -1282,11 +1310,11 @@ void Vrr::processWaitSetupReqTimer(WaitSetupReqIntTimer *setupReqTimer)
     //     }
     // }
     if (!resendSetupReq) {
-        EV_WARN << "SetupReq attempts for node " << targetVid << " reached setupReqRetryLimit=" << setupReqRetryLimit << " limit. Stop sending setupReq." << endl;
+        EV_INFO << "SetupReq attempts for node " << targetVid << " reached setupReqRetryLimit=" << setupReqRetryLimit << " limit. Stop sending setupReq." << endl;
         // delete setupReqTimer;    // don't delete because we need to record number of setupReq sent to targetVid
         
         // delete targetVid from pendingVset as it's not reachable
-        EV_WARN << "Deleting node " << targetVid << " from pendingVset" << endl;
+        EV_INFO << "Deleting node " << targetVid << " from pendingVset" << endl;
         pendingVsetErase(targetVid);    // this setupReqTimer will be cancelAndDelete()
     }
 }
@@ -1408,7 +1436,8 @@ int Vrr::getVlrUniPacketByteLength() const
         // VlrPathID tempPathid;
         // unsigned int prevHopVid;
     // return 4 * VLRRINGVID_BYTELEN + 2 * VLRPATHID_BYTELEN;
-    return 0;   // no vlrOpion for VRR packets
+    // return 0;   // no vlrOpion for VRR packets
+    return VLRRINGVID_BYTELEN;   // only account for prevHopVid
 }
 
 int Vrr::computeSetupReqByteLength(SetupReqInt* setupReq) const
@@ -1482,8 +1511,10 @@ void Vrr::sendSetupReq(const VlrRingVID& dst, const VlrRingVID& proxy, WaitSetup
 
     sendCreatedSetupReq(setupReq, proxyGateIndex);
     
-    if (sendTestPacket) { // record sent message
-        recordMessageRecord(/*action=*/0, /*src=*/vid, /*dst=*/dst, "SetupReq", /*msgId=*/0, /*hopcount=*/0, /*chunkByteLength=*/0);   // unused params (msgId, hopcount, chunkByteLength) are just assigned to 0
+    if (recordStatsToFile) { // record sent message
+        // std::ostringstream s;
+        // s << "vset=" << printVsetToString() << " pendingVset=" << printPendingVsetToString();
+        recordMessageRecord(/*action=*/0, /*src=*/vid, /*dst=*/dst, "SetupReq", /*msgId=*/0, /*hopcount=*/0, /*chunkByteLength=*/0);   // /*infoStr=*/s.str().c_str() unused params (msgId, hopcount, chunkByteLength) are just assigned to 0
     }
 
     if (setupReqTimer) {    // if setupReqTimer != nullptr
@@ -1507,7 +1538,7 @@ void Vrr::processSetupReq(SetupReqInt* reqIncoming, bool& pktForwarded)
 
     EV_INFO << "Processing SetupReq: dst = " << dstVid << ", newnode = " << newnode << ", proxy = " << proxy << endl;
     
-    if (sendTestPacket && recordReceivedMsg) {   // record received message
+    if (recordStatsToFile && recordReceivedMsg) {   // record received message
         recordMessageRecord(/*action=*/2, /*src=*/newnode, /*dst=*/dstVid, "SetupReq", /*msgId=*/reqIncoming->getMessageId(), /*hopcount=*/reqIncoming->getHopcount()+1, /*chunkByteLength=*/reqIncoming->getByteLength());   // unimportant params (msgId, hopcount)
     }
 
@@ -1518,7 +1549,7 @@ void Vrr::processSetupReq(SetupReqInt* reqIncoming, bool& pktForwarded)
         if (nextHopVid != VLRRINGVID_NULL) {
             // forward setupReq to nextHopVid
             if (checkUniPacketHopcountLimit && reqIncoming->getHopcount()+1 >= uniPacketHopcountLimit) {    // packet reached max hopcount
-                if (sendTestPacket && recordDroppedMsg) {   // record dropped message
+                if (recordStatsToFile && recordDroppedMsg) {   // record dropped message
                     recordMessageRecord(/*action=*/4, /*src=*/newnode, /*dst=*/dstVid, "SetupReq", /*msgId=*/reqIncoming->getMessageId(), /*hopcount=*/reqIncoming->getHopcount()+1, /*chunkByteLength=*/reqIncoming->getByteLength(), /*infoStr=*/"hopcount limit reached");   // unimportant params (msgId, hopcount)
                 }
                 return;
@@ -1529,7 +1560,7 @@ void Vrr::processSetupReq(SetupReqInt* reqIncoming, bool& pktForwarded)
         }
     }
     if (nextHopVid == VLRRINGVID_NULL) {    // no next hop to forward setupReq, check if newnode should be added to my vset
-        if (sendTestPacket && recordDroppedMsg) {   // record message for me
+        if (recordStatsToFile && recordDroppedMsg) {   // record message for me
             recordMessageRecord(/*action=*/1, /*src=*/newnode, /*dst=*/dstVid, "SetupReq", /*msgId=*/reqIncoming->getMessageId(), /*hopcount=*/reqIncoming->getHopcount()+1, /*chunkByteLength=*/reqIncoming->getByteLength());
         }
         // nextHopVid = VLRRINGVID_NULL here
@@ -1563,7 +1594,7 @@ void Vrr::processSetupReq(SetupReqInt* reqIncoming, bool& pktForwarded)
                 EV_INFO << "Sending SetupReply to newnode = " << newnode << ", src = " << vid << ", pathid = " << newPathid << ", proxy = " << replyOutgoing->getProxy() << ", nexthop: " << nextHopVid << endl;
                 sendCreatedSetupReply(replyOutgoing, /*outGateIndex=*/psetTable.getPneiGateIndex(nextHopVid));
 
-                if (sendTestPacket) {   // record sent message
+                if (recordStatsToFile) {   // record sent message
                     recordMessageRecord(/*action=*/0, /*src=*/vid, /*dst=*/newnode, "SetupReply", /*msgId=*/0, /*hopcount=*/0, /*chunkByteLength=*/0);   // unused params (msgId, hopcount, chunkByteLength) are just assigned to 0
                 }
 
@@ -1575,13 +1606,16 @@ void Vrr::processSetupReq(SetupReqInt* reqIncoming, bool& pktForwarded)
                     recordNewVnei(newnode);
                 
             } else {    // didn't add newnode, send setupFail
+                // EV_WARN << "Didn't add newnode to vset = " << printVsetToString() << ", sending SetupFail to newnode = " << newnode << ", proxy = " << proxy << ", nexthop: " << nextHopVid << endl;
                 auto replyOutgoing = createSetupFail(newnode, proxy);    // srcVset = vset, newnode isn't added to my vset
                 replyOutgoing->setVlrOption(vlrOptionOut);
                 EV_INFO << "Sending SetupFail to newnode = " << newnode << ", proxy = " << replyOutgoing->getProxy() << ", nexthop: " << nextHopVid << endl;
                 sendCreatedSetupFail(replyOutgoing, /*outGateIndex=*/psetTable.getPneiGateIndex(nextHopVid), /*computeChunkLength=*/true);
 
-                if (sendTestPacket) {   // record sent message
-                    recordMessageRecord(/*action=*/0, /*src=*/vid, /*dst=*/newnode, "SetupFail", /*msgId=*/0, /*hopcount=*/0, /*chunkByteLength=*/0);   // unused params (msgId, hopcount, chunkByteLength) are just assigned to 0
+                if (recordStatsToFile) {   // record sent message
+                    // std::ostringstream s;
+                    // s << "vset=" << printVsetToString() << " pendingVset=" << printPendingVsetToString();
+                    recordMessageRecord(/*action=*/0, /*src=*/vid, /*dst=*/newnode, "SetupFail", /*msgId=*/0, /*hopcount=*/0, /*chunkByteLength=*/0);   // /*infoStr=*/s.str().c_str() unused params (msgId, hopcount, chunkByteLength) are just assigned to 0
                 }
             }
         } 
@@ -1604,25 +1638,27 @@ bool Vrr::vrrAdd(const VlrIntSetupPacket *setupPacket, const VlrRingVID& srcVid)
     }
     bool addedSrc = false;
     if (srcVid != VLRRINGVID_NULL) {
-        auto addResult = shouldAddVnei(srcVid);
-        bool& shouldAdd = std::get<0>(addResult);  // access first element in tuple
-        if (shouldAdd) {
-            addedSrc = true;
-            vsetInsertRmPending(srcVid);       // srcVid will be removed from pendingVset here!
+        if (vset.find(srcVid) == vset.end()) {      // srcVid not already in vset
+            auto addResult = shouldAddVnei(srcVid);
+            bool& shouldAdd = std::get<0>(addResult);  // access first element in tuple
+            if (shouldAdd) {
+                addedSrc = true;
+                vsetInsertRmPending(srcVid);       // srcVid will be removed from pendingVset here!
 
-            std::vector<VlrRingVID>& removedNeis = std::get<1>(addResult);
-            // remove vneis that no longer belong to my vset bc newnode joining
-            for (const VlrRingVID& oldNei : removedNeis) {
-                // delayRouteTeardown() must be called before oldNei is removed from vset
-                // get vset-routes btw me and oldVnei, add to nonEssRoutes to be torn down later
-                for (const VlrPathID& oldPathid : vset.at(oldNei)) {
-                    vlrRoutingTable.vlrRoutesMap.at(oldPathid).isVsetRoute = false;
-                    // put in nonEssRoutes to be torn down right after
-                    nonEssRoutes.insert(oldPathid);
-                    if (!nonEssRouteTeardownTimer->isScheduled())
-                        scheduleAt(simTime(), nonEssRouteTeardownTimer);
+                std::vector<VlrRingVID>& removedNeis = std::get<1>(addResult);
+                // remove vneis that no longer belong to my vset bc newnode joining
+                for (const VlrRingVID& oldNei : removedNeis) {
+                    // delayRouteTeardown() must be called before oldNei is removed from vset
+                    // get vset-routes btw me and oldVnei, add to nonEssRoutes to be torn down later
+                    for (const VlrPathID& oldPathid : vset.at(oldNei)) {
+                        vlrRoutingTable.vlrRoutesMap.at(oldPathid).isVsetRoute = false;
+                        // put in nonEssRoutes to be torn down right after
+                        nonEssRoutes.insert(oldPathid);
+                        if (!nonEssRouteTeardownTimer->isScheduled())
+                            scheduleAt(simTime() + nonEssRouteExpiration, nonEssRouteTeardownTimer);
+                    }
+                    vsetEraseAddPending(oldNei, /*addToPending=*/false);
                 }
-                vsetEraseAddPending(oldNei, /*addToPending=*/false);
             }
         }
     }
@@ -1634,27 +1670,43 @@ void Vrr::recordNewVnei(const VlrRingVID& newVnei)
 {
     // set inNetwork = true bc I added newnode in vset, vset isn't empty
     if (!selfInNetwork) {
-        if (inNetworkWarmupTimer->isScheduled()) {
-            cancelEvent(inNetworkWarmupTimer);
-            EV_DETAIL << "Canceling inNetworkWarmupTimer at me=" << vid << endl;
+        // if (inNetworkWarmupTimer->isScheduled()) {
+        //     cancelEvent(inNetworkWarmupTimer);
+        //     EV_DETAIL << "Canceling inNetworkWarmupTimer at me=" << vid << endl;
+        // }
+        // selfInNetwork = true;
+        // lastTimeNodeJoinedInNetwork = simTime().dbl();
+
+        if (!inNetworkWarmupTimer->isScheduled()) {
+            scheduleAt(simTime() + inNetworkWarmupTime, inNetworkWarmupTimer);
+            EV_DETAIL << "inNetwork scheduled to become true at " << inNetworkWarmupTimer->getArrivalTime() << endl;
         }
-        selfInNetwork = true;
-        lastTimeNodeJoinedInNetwork = simTime().dbl();
+        else if (vset.size() >= 2 * vsetHalfCardinality) {  // vset is full
+            cancelEvent(inNetworkWarmupTimer);
+            selfInNetwork = true;
+
+            lastTimeNodeJoinedInNetwork = simTime().dbl();
+        }
+        else if (vset.size() == 1) { // vset was empty but inNetworkWarmupTimer was scheduled, this means I was a rep that lost all my vneis, now that I've joined an existing overlay, cancel the original inNetworkWarmupTimer to schedule a new one to wait for other vneis
+            cancelEvent(inNetworkWarmupTimer);
+            scheduleAt(simTime() + inNetworkWarmupTime, inNetworkWarmupTimer);
+            EV_DETAIL << "inNetwork re-scheduled to become true at " << inNetworkWarmupTimer->getArrivalTime() << endl;
+        }
     }
     
     EV_INFO << "Adding newnode = " << newVnei << " to vset = " << printVsetToString() << ", inNetwork = " << selfInNetwork << endl;
 
-    if (sendTestPacket) { // write node status update
+    if (recordStatsToFile) { // write node status update
         if (vset.size() >= 2 * vsetHalfCardinality) {  // vset is full
             std::ostringstream s;
             s << "vsetFull: inNetwork=" << selfInNetwork << " newVnei=" << newVnei << " vset=" << printVsetToString();
             recordNodeStatsRecord(/*infoStr=*/s.str().c_str());   // unused params (stage)
             if (convertVsetToSet() == vidRingRegVset) {
-                std::ostringstream s;
-                s << "vsetCorrect: inNetwork=" << selfInNetwork << " newVnei=" << newVnei << " vset=" << printVsetToString();
-                recordNodeStatsRecord(/*infoStr=*/s.str().c_str());
-
                 nodesVsetCorrect.insert(vid);
+
+                std::ostringstream s;
+                s << "vsetCorrect: inNetwork=" << selfInNetwork << " newVnei=" << newVnei << " vset=" << printVsetToString() << " numNodesVsetCorrect=" << nodesVsetCorrect.size();
+                recordNodeStatsRecord(/*infoStr=*/s.str().c_str());                
             }
         }
     }
@@ -1673,7 +1725,7 @@ int Vrr::computeSetupReplyByteLength(SetupReplyInt* msg) const
     // chunkByteLength += msg->getTrace().size() * VLRRINGVID_BYTELEN;
     // std::vector<unsigned int> prevhopVids
     // unsigned int oldestPrevhopIndex
-    chunkByteLength += routePrevhopVidsSize * VLRRINGVID_BYTELEN + 2;
+    chunkByteLength += (routePrevhopVidsSize-1) * VLRRINGVID_BYTELEN + 2;   // routePrevhopVidsSize-1 bc size of prevHopVid included in vlrOption
     // // bool reqVnei
     // chunkByteLength += 1;
 
@@ -1722,6 +1774,8 @@ void Vrr::sendCreatedSetupReply(SetupReplyInt *setupReply, const int& outGateInd
     // all multihop VLR packets (setupReq, setupReply, etc) L3 dst are set to a pnei, greedy routing at L3 in routeDatagram() isn't needed, but we do greedy routing and deal with VlrOption at L4 (in processSetupReq() for example) 
     // udpPacket->addTagIfAbsent<VlrIntOptionReq>()->setVlrOption(vlrOption);      // VlrOption to be set in IP header in datagramLocalOutHook()
     
+    const VlrPathID& newPathid = setupReply->getPathid();
+
     sendCreatedPacket(setupReply, /*unicast=*/true, /*outGateIndex=*/outGateIndex, /*delay=*/delay, /*checkFail=*/true);
 }
 
@@ -1740,26 +1794,39 @@ void Vrr::processSetupReply(SetupReplyInt *replyIncoming, bool& pktForwarded)
     unsigned int msgHopCount = replyIncoming->getHopcount() +1;
 
     EV_INFO << "Processing SetupReply: proxy = " << proxy << ", newnode = " << newnode << ", src = " << srcVid << ", pathid: " << newPathid << ", hopcount: " << msgHopCount << endl;
-    
-    if (sendTestPacket && recordReceivedMsg) {   // record received message
+
+    if (recordStatsToFile && recordReceivedMsg) {   // record received message
         recordMessageRecord(/*action=*/2, /*src=*/srcVid, /*dst=*/newnode, "SetupReply", /*msgId=*/replyIncoming->getMessageId(), /*hopcount=*/msgHopCount, /*chunkByteLength=*/replyIncoming->getByteLength());    // unimportant params (msgId)
     }
     bool pktForMe = false;      // set to true if this msg is directed to me or I processed it as its dst
     bool pktRecorded = false;      // set to true if this msg is recorded with recordMessageRecord()
 
+    if ((newPathid == 625507881 && srcVid == 32950 && newnode == 46281))       // && (vid == 1092 || vid == 3058)           node6145
+        EV_WARN << "ohno" << endl;
+    else if ((newPathid == 3453525040 && srcVid == 21097 && newnode == 38175))       // && (vid == 1092 || vid == 3058)     node51026
+        EV_WARN << "ohno" << endl;
+    else if ((newPathid == 206995616 && srcVid == 13667 && newnode == 21547))       // && (vid == 1092 || vid == 3058)      node376
+        EV_WARN << "ohno" << endl;
+    else if ((newPathid == 2839240247 && srcVid == 28876 && newnode == 19549))       // && (vid == 1092 || vid == 3058)     node27595
+        EV_WARN << "ohno" << endl;
+    else if ((newPathid == 4011204785 && srcVid == 15982 && newnode == 18359))       // && (vid == 1092 || vid == 3058)     node30044
+        EV_WARN << "ohno" << endl;
+    else if ((newPathid == 698354117 && srcVid == 37504 && newnode == 31987))       // && (vid == 1092 || vid == 3058)     node11285
+        EV_WARN << "ohno" << endl;
 
     auto vrouteItr = vlrRoutingTable.vlrRoutesMap.find(newPathid);
     if (vrouteItr != vlrRoutingTable.vlrRoutesMap.end()) {  // newPathid already in vlrRoutingTable
-        vrrTeardownPath(newPathid, msgPrevHopVid, /*addSrcVset=*/false, /*checkMeEndpoint=*/true);
+        EV_WARN << "Pathid of setupReply(newnode=" << newnode << ", src=" << srcVid << ", proxy=" << proxy << ") already in my vlrRoutingTable: " << vrouteItr->second << ", me=" << vid << ", vset = " << printVsetToString() << ", tearing down pathid " << newPathid << endl;
+        vrrTeardownPath(newPathid, msgPrevHopVid, /*addSrcVset=*/false, /*checkMeEndpoint=*/true, /*infoStr=*/"processSetupReply: newPathid already in vlrRoutingTable");
     } else if (!psetTable.pneiIsLinked(msgPrevHopVid)) {        // if prevHopAddr isn't a LINKED pnei
-        EV_WARN << "Previous hop " << msgPrevHopVid << " of setupReply is not a LINKED pnei, tearing down pathid " << newPathid << endl;
-        vrrTeardownPath(newPathid, msgPrevHopVid, /*addSrcVset=*/false, /*checkMeEndpoint=*/false);   // not removing an existing vroute in vlrRoutingTable
+        EV_WARN << "Previous hop " << msgPrevHopVid << " of setupReply(newnode=" << newnode << ", src=" << srcVid << ", proxy=" << proxy << ") is not a LINKED pnei, tearing down pathid " << newPathid << endl;
+        vrrTeardownPath(newPathid, msgPrevHopVid, /*addSrcVset=*/false, /*checkMeEndpoint=*/false, /*infoStr=*/"processSetupReply: previous hop is not a LINKED pnei");   // not removing an existing vroute in vlrRoutingTable
     } else if (newnode == vid) {      // this SetupReply is destined for me
         pktForMe = true;
         bool srcVidInVset = (vset.find(srcVid) != vset.end());    // if true, addedSrc will be true
         bool addedSrc = vrrAdd(replyIncoming, /*srcVid=*/srcVid);
         if (addedSrc) {
-            if (sendTestPacket) {   // record received setupReply for me that indeed adds newPathid to vlrRoutingTable
+            if (recordStatsToFile) {   // record received setupReply for me that indeed adds newPathid to vlrRoutingTable
                 recordMessageRecord(/*action=*/1, /*src=*/srcVid, /*dst=*/vid, "SetupReply", /*msgId=*/newPathid, /*hopcount=*/msgHopCount, /*chunkByteLength=*/replyIncoming->getByteLength());    // unimportant params (msgId)
                 pktRecorded = true;
             }
@@ -1777,31 +1844,34 @@ void Vrr::processSetupReply(SetupReplyInt *replyIncoming, bool& pktForwarded)
                 recordNewVnei(srcVid);
 
         } else {    // didn't add srcVid to vset, send Teardown for newPathid
-            EV_WARN << "SrcVid = " << srcVid << " of setupReply should not be added to my vset, tearing down the new pathid " << newPathid << endl;
-            vrrTeardownPath(newPathid, msgPrevHopVid, /*addSrcVset=*/true, /*checkMeEndpoint=*/false);   // not removing an existing vroute in vlrRoutingTable
+            EV_WARN << "SrcVid = " << srcVid << " of setupReply(newnode=" << newnode << ", src=" << srcVid << ", proxy=" << proxy << ") should not be added to my vset, tearing down the new pathid " << newPathid << endl;
+            vrrTeardownPath(newPathid, msgPrevHopVid, /*addSrcVset=*/true, /*checkMeEndpoint=*/false, /*infoStr=*/"processSetupReply: srcVid shouldn't be added to vset");   // not removing an existing vroute in vlrRoutingTable
         }
     }
     else {    // this SetupReply isn't destined for me
         if (checkUniPacketHopcountLimit && replyIncoming->getHopcount()+1 >= uniPacketHopcountLimit) {    // packet reached max hopcount
-            if (sendTestPacket && recordDroppedMsg) {   // record dropped message
+            if (recordStatsToFile && recordDroppedMsg) {   // record dropped message
                 recordMessageRecord(/*action=*/4, /*src=*/srcVid, /*dst=*/newnode, "SetupReply", /*msgId=*/replyIncoming->getMessageId(), /*hopcount=*/replyIncoming->getHopcount()+1, /*chunkByteLength=*/replyIncoming->getByteLength(), /*infoStr=*/"hopcount limit reached");   // unimportant params (msgId, hopcount)
                 pktRecorded = true;
             }
-            vrrTeardownPath(newPathid, msgPrevHopVid, /*addSrcVset=*/false, /*checkMeEndpoint=*/false);   // not removing an existing vroute in vlrRoutingTable
+            vrrTeardownPath(newPathid, msgPrevHopVid, /*addSrcVset=*/false, /*checkMeEndpoint=*/false, /*infoStr=*/"processSetupReply: hopcount limit reached");   // not removing an existing vroute in vlrRoutingTable
             return;
         } else {
             VlrIntOption& vlrOptionIn = replyIncoming->getVlrOptionForUpdate();
             VlrRingVID nextHopVid = findNextHopForSetupReply(vlrOptionIn, /*newnode=*/newnode);
             if (nextHopVid == VLRRINGVID_NULL) {
-                EV_WARN << "No next hop found for SetupReply received at me = " << vid << ", tearing down vroute: pathid = " << newPathid << ", newnode = " << newnode << ", src = " << srcVid << ", proxy = " << proxy << endl;
-                vrrTeardownPath(newPathid, msgPrevHopVid, /*addSrcVset=*/true, /*checkMeEndpoint=*/false);   // not removing an existing vroute in vlrRoutingTable
+                EV_WARN << "No next hop found for SetupReply(newnode=" << newnode << ", src=" << srcVid << ", proxy=" << proxy << ") received at me = " << vid << ", tearing down vroute: pathid = " << newPathid << ", newnode = " << newnode << ", src = " << srcVid << ", proxy = " << proxy << endl;
+                vrrTeardownPath(newPathid, msgPrevHopVid, /*addSrcVset=*/true, /*checkMeEndpoint=*/false, /*infoStr=*/"processSetupReply: no next hop found");   // not removing an existing vroute in vlrRoutingTable
             } else {    // nexthop found for SetupReply
                 // we've checked newPathid not in vlrRoutingTable
                 auto itr_bool = vlrRoutingTable.addRoute(newPathid, srcVid, newnode, /*prevhopVid=*/msgPrevHopVid, /*nexthopVid=*/nextHopVid, /*isVsetRoute=*/false);
                 std::vector<VlrRingVID>& routePrevhopVids = itr_bool.first->second.prevhopVids;
                 unsigned int oldestPrevhopIndex = setRoutePrevhopVidsFromMessage(routePrevhopVids, replyIncoming->getPrevhopVidsForUpdate(), replyIncoming->getOldestPrevhopIndex());
                 replyIncoming->setOldestPrevhopIndex(oldestPrevhopIndex);
-                
+
+                // if (msgPrevHopVid == nextHopVid)
+                //     EV_ERROR << "ohno src=" << srcVid << " dst=" << newnode << " newPathid=" << newPathid << " msgPrevHopVid=nextHopVid=" << nextHopVid << " at me=" << vid << " hopcount=" << msgHopCount << endl;
+
                 EV_INFO << "Added new vroute: newPathid = " << newPathid << " " << vlrRoutingTable.vlrRoutesMap.at(newPathid) << endl;
                 // replyOutgoing->setHopcount(msgHopCount);     // Commented out bc will increment in sendCreatedSetupReply()
                 sendCreatedSetupReply(replyIncoming, /*outGateIndex=*/psetTable.getPneiGateIndex(nextHopVid), /*computeChunkLength=*/false);    // no need to recompute chunk length when forwarding
@@ -1810,7 +1880,7 @@ void Vrr::processSetupReply(SetupReplyInt *replyIncoming, bool& pktForwarded)
         }
     }
 
-    if (sendTestPacket && recordDroppedMsg && !pktRecorded) {   // record message
+    if (recordStatsToFile && recordDroppedMsg && !pktRecorded) {   // record message
         if (pktForMe)
             recordMessageRecord(/*action=*/1, /*src=*/srcVid, /*dst=*/newnode, "SetupReply", /*msgId=*/replyIncoming->getMessageId(), /*hopcount=*/replyIncoming->getHopcount()+1, /*chunkByteLength=*/replyIncoming->getByteLength());
         else if (!pktForwarded)
@@ -1911,7 +1981,7 @@ void Vrr::processSetupFail(SetupFailInt *msgIncoming, bool& pktForwarded)
     VlrRingVID proxy = msgIncoming->getProxy();       // can also get proxy using vlrOptionIn->getDstVid()
     EV_INFO << "Processing SetupFail: proxy = " << proxy << ", newnode = " << newnode << ", src = " << srcVid << ", prevhop: " << msgPrevHopVid << endl;
 
-    if (sendTestPacket && recordReceivedMsg) {   // record received message
+    if (recordStatsToFile && recordReceivedMsg) {   // record received message
         recordMessageRecord(/*action=*/2, /*src=*/srcVid, /*dst=*/newnode, "SetupFail", /*msgId=*/msgIncoming->getMessageId(), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength());  // unimportant params (msgId, hopcount)
     }
     bool pktForMe = false;      // set to true if this msg is directed to me or I processed it as its dst
@@ -1941,7 +2011,7 @@ void Vrr::processSetupFail(SetupFailInt *msgIncoming, bool& pktForwarded)
         if (nextHopVid != VLRRINGVID_NULL) {
             // forward setupFail to nextHopVid
             if (checkUniPacketHopcountLimit && msgIncoming->getHopcount()+1 >= uniPacketHopcountLimit) {    // packet reached max hopcount
-                if (sendTestPacket && recordDroppedMsg) {   // record dropped message
+                if (recordStatsToFile && recordDroppedMsg) {   // record dropped message
                     recordMessageRecord(/*action=*/4, /*src=*/srcVid, /*dst=*/newnode, "SetupFail", /*msgId=*/msgIncoming->getMessageId(), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength(), /*infoStr=*/"hopcount limit reached");   // unimportant params (msgId, hopcount)
                     pktRecorded = true;
                 }
@@ -1953,7 +2023,7 @@ void Vrr::processSetupFail(SetupFailInt *msgIncoming, bool& pktForwarded)
         }
     }
 
-    if (sendTestPacket && recordDroppedMsg && !pktRecorded) {   // record message
+    if (recordStatsToFile && recordDroppedMsg && !pktRecorded) {   // record message
         if (pktForMe)
             recordMessageRecord(/*action=*/1, /*src=*/srcVid, /*dst=*/newnode, "SetupFail", /*msgId=*/msgIncoming->getMessageId(), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength());
         else if (!pktForwarded)
@@ -2000,7 +2070,18 @@ void Vrr::sendCreatedTeardown(TeardownInt *msg, VlrRingVID nextHopPnei, double d
     msg->getVlrOptionForUpdate().setPrevHopVid(vid);    // set packet prevHopVid to myself
     msg->setHopcount(msg->getHopcount() +1);    // increment packet hopcount
 
-    sendCreatedPacket(msg, /*unicast=*/true, /*outGateIndex=*/psetTable.getPneiGateIndex(nextHopPnei), /*delay=*/delay, /*checkFail=*/true);
+    const VlrPathID& oldPathid = msg->getPathids(0);
+    // if ((oldPathid == 3882923163) && simTime() > 500)
+    //     EV_WARN << "ohno" << endl;
+
+    // Teardown may be sent to msgPrevHopVid which may not be a pnei in my pset
+    int nextHopGateIndex = psetTable.findPneiGateIndex(nextHopPnei);
+    if (nextHopGateIndex == -1) {
+        nextHopGateIndex = psetTable.findRecvNeiGateIndex(nextHopPnei);
+        if (nextHopGateIndex == -1)
+            throw cRuntimeError("sendCreatedTeardown(nextHopPnei=%d) at me=%d, cannot find gateIndex associated with nextHopPnei in psetTable.vidToStateMap or psetTable.recvVidToGateIndexMap", nextHopPnei, vid);
+    }
+    sendCreatedPacket(msg, /*unicast=*/true, /*outGateIndex=*/nextHopGateIndex, /*delay=*/delay, /*checkFail=*/true);
 }
 
 void Vrr::processTeardown(TeardownInt* msgIncoming, bool& pktForwarded)
@@ -2018,7 +2099,7 @@ void Vrr::processTeardown(TeardownInt* msgIncoming, bool& pktForwarded)
         EV_INFO << msgIncoming->getPathids(i) << " ";
     EV_INFO << "]" << ", prevhop: " << msgPrevHopVid << endl;
 
-    if (sendTestPacket && recordReceivedMsg) {   // record received message
+    if (recordStatsToFile && recordReceivedMsg) {   // record received message
         recordMessageRecord(/*action=*/2, /*src=*/msgIncoming->getSrc(), /*dst=*/vid, "Teardown", /*msgId=*/msgIncoming->getPathids(0), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength());  // unimportant params (msgId, hopcount)
     }
     bool pktForMe = false;      // set to true if this msg is directed to me or I processed it as its dst
@@ -2064,7 +2145,7 @@ void Vrr::processTeardown(TeardownInt* msgIncoming, bool& pktForwarded)
             }
         }
     }
-    if (sendTestPacket && recordDroppedMsg && !pktRecorded) {   // record message
+    if (recordStatsToFile && recordDroppedMsg && !pktRecorded) {   // record message
         if (pktForMe)
             recordMessageRecord(/*action=*/1, /*src=*/msgIncoming->getSrc(), /*dst=*/vid, "Teardown", /*msgId=*/msgIncoming->getPathids(0), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength());
         else if (!pktForwarded)
@@ -2122,7 +2203,7 @@ bool Vrr::removeEndpointOnTeardown(const VlrPathID& pathid, const VlrRingVID& to
                     //     EV_DETAIL << "I'm the rep, inNetwork scheduled to become true at " << inNetworkWarmupTimer->getArrivalTime() << endl;
                     // }
                 }
-                if (sendTestPacket) { // write node status update
+                if (recordStatsToFile) { // write node status update
                     std::ostringstream s;
                     s << "vsetUnfull: inNetwork=" << selfInNetwork << " removedVnei=" << towardVid << " vset=" << printVsetToString() << " vsetSize=" << vset.size();
                     recordNodeStatsRecord(/*infoStr=*/s.str().c_str());   // unused params (stage)
@@ -2145,7 +2226,7 @@ bool Vrr::removeEndpointOnTeardown(const VlrPathID& pathid, const VlrRingVID& to
 // remove newPathid from vlrRoutingTable, send Teardown to its prevhopVid, nexthopVid and msgPrevHopVid != VLRRINGVID_NULL
 // if checkMeEndpoint=true, check if newPathid is a vset-route at me, if so, remove otherEnd from vset
 // if addSrcVset=true, add my vset in Teardown to send
-void Vrr::vrrTeardownPath(VlrPathID newPathid, VlrRingVID msgPrevHopVid, bool addSrcVset, bool checkMeEndpoint)
+void Vrr::vrrTeardownPath(VlrPathID newPathid, VlrRingVID msgPrevHopVid, bool addSrcVset, bool checkMeEndpoint, const char *infoStr/*=""*/)
 {
     std::vector<VlrRingVID> sendTeardownToAddrs;
     // bool addSrcVset = (msgPrevHopVid == VLRRINGVID_NULL);   // include my vset if I initiated this Teardown
@@ -2168,8 +2249,11 @@ void Vrr::vrrTeardownPath(VlrPathID newPathid, VlrRingVID msgPrevHopVid, bool ad
                     const auto& teardownOut = createTeardown(/*pathid=*/newPathid, /*addSrcVset=*/addSrcVset);
                     sendCreatedTeardown(teardownOut, /*nextHopPnei=*/nextHopVid);
 
-                    if (sendTestPacket) {   // record sent message
-                        recordMessageRecord(/*action=*/0, /*src=*/vid, /*dst=*/towardEnd, "Teardown", /*msgId=*/0, /*hopcount=*/0, /*chunkByteLength=*/0, /*infoStr=*/"vrrTeardownPath: to prevhopVid/nexthopVid");   // unused params (msgId, hopcount, chunkByteLength) are just assigned to 0
+                    if (recordStatsToFile) {   // record sent message
+                        char infoCharArray[300] = "vrrTeardownPath: to prevhopVid/nexthopVid | ";
+                        // if (infoStr[0] == '\0')    // if infoStr is empty
+                        strcat(infoCharArray, infoStr);
+                        recordMessageRecord(/*action=*/0, /*src=*/vid, /*dst=*/towardEnd, "Teardown", /*msgId=*/0, /*hopcount=*/0, /*chunkByteLength=*/0, /*infoStr=*/infoCharArray);   // unused params (msgId, hopcount, chunkByteLength) are just assigned to 0
                     }
                 } else {    // next hop is unavailable, remove this vroute that have been torn down from lostPneis.brokenVroutes
                     removeRouteFromLostPneiBrokenVroutes(newPathid, /*lostPneiVid=*/nextHopVid);
@@ -2192,8 +2276,10 @@ void Vrr::vrrTeardownPath(VlrPathID newPathid, VlrRingVID msgPrevHopVid, bool ad
             const auto& teardownOut = createTeardown(/*pathid=*/newPathid, /*addSrcVset=*/addSrcVset);
             sendCreatedTeardown(teardownOut, /*nextHopPnei=*/msgPrevHopVid);
 
-            if (sendTestPacket) {   // record sent message
-                recordMessageRecord(/*action=*/0, /*src=*/vid, /*dst=*/VLRRINGVID_NULL, "Teardown", /*msgId=*/0, /*hopcount=*/0, /*chunkByteLength=*/0, /*infoStr=*/"vrrTeardownPath: to msgPrevHopVid");   // unused params (msgId, hopcount, chunkByteLength) are just assigned to 0
+            if (recordStatsToFile) {   // record sent message
+                char infoCharArray[300] = "vrrTeardownPath: to msgPrevHopVid | ";
+                strcat(infoCharArray, infoStr);
+                recordMessageRecord(/*action=*/0, /*src=*/vid, /*dst=*/VLRRINGVID_NULL, "Teardown", /*msgId=*/0, /*hopcount=*/0, /*chunkByteLength=*/0, /*infoStr=*/infoCharArray);   // unused params (msgId, hopcount, chunkByteLength) are just assigned to 0
             }
         }
     }
@@ -2313,12 +2399,12 @@ void Vrr::processTestPacket(VlrIntTestPacket *msgIncoming, bool& pktForwarded)
         // emit(testpacketReceivedSignal, srcVid);     // emit src of this TestPacket
     }
     else {  // this TestPacket isn't destined for me
-        // if (sendTestPacket && recordReceivedMsg)   // Commented out bc we're processing TestPacket, sendTestPacket must be true
+        // if (recordStatsToFile && recordReceivedMsg)   // Commented out bc we're processing TestPacket, sendTestPacket must be true
         // Commented out and only record "arrived"/"dropped" TestPacket     NOTE record "dropped" TestPacket even if recordDroppedMsg=false to check see how its hopcount
         // recordMessageRecord(/*action=*/2, /*src=*/srcVid, /*dst=*/dstVid, "TestPacket", /*msgId=*/msgIncoming->getMessageId(), /*hopcount=*/msgHopCount, /*chunkByteLength=*/msgIncoming->getByteLength());  // unimportant params (msgId, hopcount)
 
         if (checkUniPacketHopcountLimit && msgIncoming->getHopcount()+1 >= uniPacketHopcountLimit) {    // packet reached max hopcount
-            if (sendTestPacket /*&& recordDroppedMsg*/) {   // record dropped message
+            if (recordStatsToFile /*&& recordDroppedMsg*/) {   // record dropped message
                 recordMessageRecord(/*action=*/4, /*src=*/srcVid, /*dst=*/dstVid, "TestPacket", /*msgId=*/msgIncoming->getMessageId(), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength(), /*infoStr=*/"hopcount limit reached");   // unimportant params (msgId, hopcount)
             }
             return;
@@ -2329,7 +2415,7 @@ void Vrr::processTestPacket(VlrIntTestPacket *msgIncoming, bool& pktForwarded)
             if (nextHopVid == VLRRINGVID_NULL) {
                 // delete vlrOptionOut;
                 EV_WARN << "No next hop found for TestPacket received at me = " << vid << ", dropping packet: src = " << srcVid << ", dst = " << dstVid << ", hopCount = " << msgHopCount << endl;
-                if (sendTestPacket /*&& recordDroppedMsg*/) {   // record dropped message
+                if (recordStatsToFile /*&& recordDroppedMsg*/) {   // record dropped message
                     recordMessageRecord(/*action=*/4, /*src=*/srcVid, /*dst=*/dstVid, "TestPacket", /*msgId=*/msgIncoming->getMessageId(), /*hopcount=*/msgIncoming->getHopcount()+1, /*chunkByteLength=*/msgIncoming->getByteLength(), /*infoStr=*/"no next hop");   // unimportant params (msgId, hopcount)
                 }
             } else {    // nexthop found to forward TestPacket
@@ -2378,15 +2464,23 @@ void Vrr::processWaitRepairLinkTimer(WaitRepairLinkIntTimer *repairLinkTimer)
                             auto mpneiItr = psetTable.mpneiToPneiMap.find(prevprevhop);
                             if (mpneiItr != psetTable.mpneiToPneiMap.end()) {
                                 ASSERT(!mpneiItr->second.empty());      // assert there's pnei associated with this mpnei
-                                const VlrRingVID& nextHopVid = *(mpneiItr->second.begin());
-                                ASSERT(psetTable.pneiIsLinked(nextHopVid));     // should be true bc when a pnei is no longer LINKED, we remove mpneis associated with it
-                                // linkTrace: [prevprevhop, pnei that has prevprevhop as mpnei]
-                                linkTrace.push_back(prevprevhop);
-                                linkTrace.push_back(nextHopVid);
+                                // const VlrRingVID& nextHopVid = *(mpneiItr->second.begin());
+                                for (const auto& nextHopVid : mpneiItr->second) {    // find a pnei != nexthop that's connected to prevprevhop, bc we assume prevhop != nexthop
+                                    if (nextHopVid != vrouteItr->second.nexthopVid) {
+                                        ASSERT(psetTable.pneiIsLinked(nextHopVid));     // should be true bc when a pnei is no longer LINKED, we remove mpneis associated with it
+                                        // linkTrace: [prevprevhop, pnei that has prevprevhop as mpnei]
+                                        linkTrace.push_back(prevprevhop);
+                                        linkTrace.push_back(nextHopVid);
+                                        break;
+                                    }
+                                }
                             }
                         }
                     }
                     if (!linkTrace.empty()) {   // found a way to repair brokenPathid
+                        EV_WARN << "Sending RepairLocalReply for brokenPathid = " << brokenPathid << ": " << vrouteItr->second << ", linkTrace=" << linkTrace << endl;
+                        // if (vid == 3058 || vid == 1092 || vrouteItr->second.nexthopVid == vrouteItr->second.prevhopVid)
+                        //     EV_INFO << "ohno" << endl;
                         // change route prevhop (unavailable) to next hop in linkTrace, which I've checked is LINKED pnei
                         const VlrRingVID& nextHopVid = linkTrace.back();
                         vrouteItr->second.prevhopVid = nextHopVid;
@@ -2399,7 +2493,8 @@ void Vrr::processWaitRepairLinkTimer(WaitRepairLinkIntTimer *repairLinkTimer)
                             routePrevhopVids.push_back(linkTrace[i]);
                         
                         // will remove brokenPathid from lostPneis[prevhopVid].brokenVroutes
-                        repairedBrokenPathids.push_back(brokenPathid);
+                        if (lostPneiItr->first != vrouteItr->second.nexthopVid)  // route prevhop == lost pnei, ensure route nexthop != lost pnei
+                            repairedBrokenPathids.push_back(brokenPathid);
 
                         // send RepairLocalReply using linkTrace
                         auto replyOutgoing = createRepairLocalReply();
@@ -2407,7 +2502,7 @@ void Vrr::processWaitRepairLinkTimer(WaitRepairLinkIntTimer *repairLinkTimer)
                         replyOutgoing->setLinkTrace(linkTrace);
                         sendCreatedRepairLocalReply(replyOutgoing, /*outGateIndex=*/psetTable.getPneiGateIndex(nextHopVid), /*computeChunkLength=*/true);
 
-                        if (sendTestPacket) {   // record sent message
+                        if (recordStatsToFile) {   // record sent message
                             recordMessageRecord(/*action=*/0, /*src=*/vid, /*dst=*/linkTrace.at(0), "RepairLocalReply", /*msgId=*/0, /*hopcount=*/0, /*chunkByteLength=*/0);   // unused params (msgId, hopcount, chunkByteLength) are just assigned to 0
                         }
                     }
@@ -2458,12 +2553,14 @@ void Vrr::processWaitRepairLinkTimer(WaitRepairLinkIntTimer *repairLinkTimer)
                                 const auto& teardownOut = createTeardown(/*pathid=*/oldPathid, /*addSrcVset=*/false);
                                 sendCreatedTeardown(teardownOut, /*nextHopPnei=*/nextHopVid);
 
-                                if (sendTestPacket) {   // record sent message
+                                if (recordStatsToFile) {   // record sent message
                                     recordMessageRecord(/*action=*/0, /*src=*/vid, /*dst=*/towardEnd, "Teardown", /*msgId=*/0, /*hopcount=*/0, /*chunkByteLength=*/0, /*infoStr=*/"repairLinkReq retry limit");   // unused params (msgId, hopcount, chunkByteLength) are just assigned to 0
                                 }
 
-                            } else  // next hop unavailable and regular vroute, remove this vroute from lostPneis.brokenVroutes
-                                removeRouteFromLostPneiBrokenVroutes(oldPathid, /*lostPneiVid=*/nextHopVid);
+                            } else { // next hop unavailable and regular vroute, remove this vroute from lostPneis.brokenVroutes
+                                if (nextHopVid != targetVid)    // if vrouteItr->second.nexthopVid == vrouteItr->second.prevhopVid == targetVid, no need to remove pathid from lostPneis[targetVid].brokenVroutes bc lostPneis[targetVid] will be erased
+                                    removeRouteFromLostPneiBrokenVroutes(oldPathid, /*lostPneiVid=*/nextHopVid);
+                            }
 
                             // if (removeFromRoutingTable) {
                             EV_DETAIL << "Pathid " << oldPathid << " is removed from vlrRoutingTable, nextHopIsUnavailable = " << (int)nextHopIsUnavailable << endl;
@@ -2596,7 +2693,7 @@ void Vrr::processRepairLocalReply(RepairLocalReplyInt *replyIncoming, bool& pktF
 
     EV_INFO << "Processing RepairLocalReply: src = " << srcVid << ", dstVid = " << dstVid << ", pathid = " << newPathid << ", prevhop: " << msgPrevHopVid << endl;
 
-    if (sendTestPacket && recordReceivedMsg) {   // record received message
+    if (recordStatsToFile && recordReceivedMsg) {   // record received message
         recordMessageRecord(/*action=*/2, /*src=*/srcVid, /*dst=*/dstVid, "RepairLocalReply", /*msgId=*/replyIncoming->getMessageId(), /*hopcount=*/replyIncoming->getHopcount()+1, /*chunkByteLength=*/replyIncoming->getByteLength());    // unimportant params (msgId)
     }
     bool pktForMe = false;      // set to true if this msg is directed to me or I processed it as its dst
@@ -2667,10 +2764,12 @@ void Vrr::processRepairLocalReply(RepairLocalReplyInt *replyIncoming, bool& pktF
                     auto itr_bool = vlrRoutingTable.addRoute(newPathid, /*fromVid=*/routeEndAndPrev[0], /*toVid=*/routeEndAndPrev[1], /*prevhopVid=*/nextHopVid, /*nexthopVid=*/msgPrevHopVid, /*isVsetRoute=*/false);
 
                     // change route prevhopVids (closest node at front) based on reversed linkTrace (closest node at back)
-                    
                     ASSERT(linkTrace.size() == 1 && nextHopVid == dstVid);    // bc linkTrace can contain at most two nodes in VRR local repair, if this isn't linkTrace[0], next hop has to be it
                     std::vector<VlrRingVID>& routePrevhopVids = itr_bool.first->second.prevhopVids;     // should be empty bc just added this vroute
                     routePrevhopVids.push_back(dstVid);
+
+                    // if (nextHopVid == msgPrevHopVid)
+                    //     EV_INFO << "ohno" << endl;
 
                     EV_INFO << "Added new vroute: newPathid = " << newPathid << ", sending RepairLocalReply to dst = " << dstVid << ", src = " << srcVid << ", trace = " << replyIncoming->getLinkTrace() << endl;
                     sendCreatedRepairLocalReply(replyIncoming, /*outGateIndex=*/psetTable.getPneiGateIndex(nextHopVid), /*computeChunkLength=*/true);
@@ -2680,7 +2779,7 @@ void Vrr::processRepairLocalReply(RepairLocalReplyInt *replyIncoming, bool& pktF
         }
     }
 
-    if (sendTestPacket && recordDroppedMsg && !pktRecorded) {   // record message
+    if (recordStatsToFile && recordDroppedMsg && !pktRecorded) {   // record message
         if (pktForMe)
             recordMessageRecord(/*action=*/1, /*src=*/srcVid, /*dst=*/dstVid, "RepairLocalReply", /*msgId=*/replyIncoming->getMessageId(), /*hopcount=*/replyIncoming->getHopcount()+1, /*chunkByteLength=*/replyIncoming->getByteLength());
         else if (!pktForwarded)
@@ -2713,16 +2812,17 @@ void Vrr::processFillVsetTimer()
     //
     simtime_t currTime = simTime();
     for (auto it = representativeMap.begin(); it != representativeMap.end(); )
-        if (it->second.lastHeard <= currTime - 2 * repSeqValidityInterval)
+        if (it->second.lastHeard <= currTime - repSeqPersistenceInterval) {
+            expiredErasedReps[it->first] = it->second.sequencenumber;
             representativeMap.erase(it++);     // step1: it_tobe = it+1; step2: recentSetupReqFrom.erase(it); step3: it = it_tobe;
-        else
+        } else
             it++;
     
     //
     // write message records to file if allSendRecords has become large
     // write node records to file
     //
-    if (sendTestPacket) {
+    if (recordStatsToFile) {
         if (allSendRecords.size() > 10000)
             writeToResultMessageFile();
         if (allNodeRecords.size() > 10000)     // whichever node first sees size exceeding limit should write to node file
@@ -2779,7 +2879,7 @@ VlrRingVID Vrr::findNextHop(VlrIntOption& vlrOption, VlrRingVID excludeVid/*=VLR
     //             auto teardownOut = createTeardownOnePathid(tempPathid, /*addSrcVset=*/false, /*rebuild=*/true);
     //             sendCreatedTeardown(teardownOut, /*nextHopVid=*/prevHopVid);
 
-    //             if (sendTestPacket) {   // record sent message
+    //             if (recordStatsToFile) {   // record sent message
     //                 recordMessageRecord(/*action=*/0, /*src=*/vid, /*dst=*/VLRRINGVID_NULL, "Teardown", /*msgId=*/0, /*hopcount=*/0, /*chunkByteLength=*/0, /*infoStr=*/"findNextHop: tempPathid not found in vlrRoutingTable");   // unused params (msgId, hopcount, chunkByteLength) are just assigned to 0
     //             }
     //         }
@@ -2832,8 +2932,8 @@ VlrRingVID Vrr::findNextHop(VlrIntOption& vlrOption, VlrRingVID excludeVid/*=VLR
     // finally compare minDistance with my own distance to dst
     unsigned int meDstDistance = computeVidDistance(vid, dstVid);
     bool useNextVid = (minDistance < meDstDistance);
-    if (!useNextVid && minDistance == meDstDistance && nextVid != vid && getVid_CCW_Distance(dstVid, nextVid) < getVid_CCW_Distance(dstVid, vid))   // nextVid in ccw direction of dst, I'm in cw direction of dst
-        useNextVid = true;
+    // if (!useNextVid && minDistance == meDstDistance && nextVid != vid && getVid_CCW_Distance(dstVid, nextVid) < getVid_CCW_Distance(dstVid, vid))   // nextVid in ccw direction of dst, I'm in cw direction of dst
+    //     useNextVid = true;
     if (useNextVid) {
         // if message was using a vroute (currPathid), ensure nextVid isn't farther from dst than towardVid -- only possible if currPathid isn't in my vlrRoutingTable, or next hop of currPathid is unavailable (i.e. a lost pnei)
         // VlrPathID currPathid = vlrOption.getCurrentPathid();
@@ -2857,7 +2957,7 @@ VlrRingVID Vrr::findNextHop(VlrIntOption& vlrOption, VlrRingVID excludeVid/*=VLR
         //                             auto teardownOut = createTeardownOnePathid(currPathid, /*addSrcVset=*/false, /*rebuild=*/true);
         //                             sendCreatedTeardownToNextHop(teardownOut, /*nextHopVid=*/otherEnd, /*nextHopIsUnavailable=*/2);
 
-        //                             if (sendTestPacket) {   // record sent message
+        //                             if (recordStatsToFile) {   // record sent message
         //                                 recordMessageRecord(/*action=*/0, /*src=*/vid, /*dst=*/VLRRINGVID_NULL, "Teardown", /*msgId=*/0, /*hopcount=*/0, /*chunkByteLength=*/0, /*infoStr=*/"findNextHop: currPathid not found in vlrRoutingTable");   // unused params (msgId, hopcount, chunkByteLength) are just assigned to 0
         //                             }
         //                         } else
@@ -2870,7 +2970,7 @@ VlrRingVID Vrr::findNextHop(VlrIntOption& vlrOption, VlrRingVID excludeVid/*=VLR
         //                     auto teardownOut = createTeardownOnePathid(currPathid, /*addSrcVset=*/false, /*rebuild=*/true);
         //                     sendCreatedTeardown(teardownOut, /*nextHopVid=*/prevHopVid);
 
-        //                     if (sendTestPacket) {   // record sent message
+        //                     if (recordStatsToFile) {   // record sent message
         //                         recordMessageRecord(/*action=*/0, /*src=*/vid, /*dst=*/VLRRINGVID_NULL, "Teardown", /*msgId=*/0, /*hopcount=*/0, /*chunkByteLength=*/0, /*infoStr=*/"findNextHop: currPathid not found in vlrRoutingTable");   // unused params (msgId, hopcount, chunkByteLength) are just assigned to 0
         //                     }
         //                 }
@@ -2892,7 +2992,7 @@ VlrRingVID Vrr::findNextHop(VlrIntOption& vlrOption, VlrRingVID excludeVid/*=VLR
         //             return VLRRINGVID_NULL;
         //         }
         //     }
-        // }
+        // }        
         if (!usingVroute) {     // using physical link
             ASSERT(nextVid != vid && nexthopVid != vid);    // psetTable and representativeMap shouldn't contain my own vid
             // if (usingMPnei) {   // nextVid in overheardMPneis
@@ -2909,6 +3009,9 @@ VlrRingVID Vrr::findNextHop(VlrIntOption& vlrOption, VlrRingVID excludeVid/*=VLR
                 vlrOption.setCurrentPathid(VLRPATHID_INVALID);
             }
             vlrOption.setTempPathid(VLRPATHID_INVALID);
+
+            // if ((dstVid == 3026 || dstVid == 12954) && (vid == 1092 || vid == 3058) && simTime() > 550)
+            //     EV_WARN << "ohno dstVid == "<< dstVid << ", usingVroute=" << usingVroute << ", usingRepPath=" << usingRepPath << ", nextVid=" << nextVid << ", nexthopVid=" << nexthopVid << ", psetTable=" << psetTable << ", repMap=" << printRepresentativeMapToString() << endl;
             return nexthopVid;
         } else {        // using vroute in VlrRingRoutingTable
             ASSERT(nextVid != vid);     // checked if minDistance == meDstDistance, vid != nextVid
@@ -2983,6 +3086,8 @@ VlrRingVID Vrr::findNextHop(VlrIntOption& vlrOption, VlrRingVID excludeVid/*=VLR
             //     }
             // } else  // nextHopAddr is a LINKED pnei
             vlrOption.setTempPathid(VLRPATHID_INVALID);
+            // if ((dstVid == 3026 || dstVid == 12954) && (vid == 1092 || vid == 3058) && simTime() > 550)
+            //     EV_WARN << "ohno dstVid == " << dstVid << ", usingVroute=" << usingVroute << ", using pathid=" << nextPathid << ", towardVid=" << nextVid << ", nexthopVid=" << nexthopVid << ", vlrRoutingTable=" << vlrRoutingTable << endl;
             return nexthopVid;
         }
     } else {     // minDistance > my own distance to dst, or minDistance == my own distance and nextVid != my vid and nextVid in ccw direction of dst
@@ -3008,6 +3113,7 @@ VlrRingVID Vrr::findNextHopForSetupReply(VlrIntOption& vlrOption, VlrRingVID new
         EV_WARN << "No next hop because me = " << vid << " is the proxy but newnode = " << newnode << " is not a LINKED pnei" << endl;
         return VLRRINGVID_NULL;
     }
+
     // continue to find nexthop to proxy
     return findNextHop(vlrOption, /*excludeVid=*/VLRRINGVID_NULL);
 }
@@ -3418,6 +3524,40 @@ std::string Vrr::printVsetToString() const
     }
     str += '}';
     return str;
+}
+
+std::string Vrr::printPendingVsetToString() const
+{
+    std::ostringstream s;
+    s << '{';
+    for (auto& pair : pendingVset) {
+        s << pair.first;
+        if (pair.second != nullptr && pair.second->isScheduled())
+            s << ':' << pair.second->getRetryCount();
+        s << ' ';
+    }
+    s << '}';
+    return s.str();
+}
+
+std::string Vrr::printRepresentativeMapToString() const
+{
+    std::ostringstream s;
+    s << '{';
+    for (auto& rep : representativeMap) {
+        s << rep.first << ":s" << rep.second.sequencenumber << ":h" << rep.second.lastHeard << ' ';
+    }
+    s << '}';
+    return s.str();
+}
+
+std::string Vrr::printVlrOptionToString(const VlrIntOption& vlrOption) const
+{
+    std::ostringstream s;
+    s << '{';
+    s << "dst=" << vlrOption.getDstVid() << " toward=" << vlrOption.getTowardVid() << " currpath=" << vlrOption.getCurrentPathid();
+    s << '}';
+    return s.str();
 }
 
 // print pathids in vlrRoutingTable whose toVid is me

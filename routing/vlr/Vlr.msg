@@ -184,6 +184,7 @@ class SetupFailInt extends VlrIntSetupPacket
     unsigned int proxy;
     unsigned int newnode;
     unsigned int src;
+    // bool notifyVsetOnly;            // if true, this SetupFail is only used as a NotifyVset to newnode
     VlrIntVidVec trace;         // if specified, not using greedy routing
 }
 
@@ -256,6 +257,17 @@ class RepairLinkReplyInt extends VlrIntSetupPacket {
 }
 
 //
+// repairLinkFail that uses unsigned int for vid
+//
+class RepairLinkFailInt extends VlrIntSetupPacket {
+    unsigned int dst;
+    unsigned int src;
+    VlrIntVidVec brokenPathids;		// avoid redefinition of std::vector<unsigned int>
+    // VlrIntPathidVec brokenPathids;  // dst sent repairLinkReply to src, src is nexthop in brokenPathids at dst; these vroutes were not repaired at src by the new temporary route
+    VlrPathID tempPathid;
+}
+
+//
 // repairRoute that uses unsigned int for vid
 //
 class RepairRouteInt extends VlrIntSetupPacket
@@ -270,7 +282,9 @@ class RepairRouteInt extends VlrIntSetupPacket
 class NotifyVsetInt extends VlrIntSetupPacket {
     unsigned int dst;
     unsigned int src;
+    unsigned int proxy;
     bool toVnei;
+    VlrIntVidVec trace;         // if specified, not using greedy routing
 }
 
 //

@@ -64,6 +64,7 @@ class Vlr : public RoutingBase
     double neighborValidityInterval;
     // double pneiDiscoveryTime;        // minimum warmup time to discover pneis and fill up pset with beacons before sending the first setupReq
     double repSeqValidityInterval;   // max time that node can hold an unchanged rep sequence number, after that the rep is considered expired
+    double repSeqPersistenceInterval;   // rep can be erased in representativeMap after lastHeard + repSeqPersistenceInterval, we should be sure that this rep has expired at all nodes in network
     
     int setupReqRetryLimit;
     int repairLinkReqFloodTTL = 8;     // max number of hops a repairLinkReqFlood will propagate, i.e. the number of nodes that will send/forward a repairLinkReqFlood
@@ -110,9 +111,10 @@ class Vlr : public RoutingBase
 
     // statistics measurement
     bool sendTestPacket;
+    bool recordStatsToFile = true;   // record node and messages statistics to file
     static const double testSendInterval;         // time interval to send a test message for statistics measurement
-    static const bool recordReceivedMsg = true;          // record received message (may not be directed to me) with recordMessageRecord(/*action=*/2
-    static const bool recordDroppedMsg = false;          // record message arrived and destined for me, or dropped at me with recordMessageRecord(/*action=*/1 or 4
+    bool recordReceivedMsg;          // record received message (may not be directed to me) with recordMessageRecord(/*action=*/2
+    bool recordDroppedMsg;          // record message arrived and destined for me, or dropped at me with recordMessageRecord(/*action=*/1 or 4
     unsigned int numTestPacketReceived = 0;       // number of test messages received (handled or forwarded)
 
     // time to start sending TestPacket
@@ -151,11 +153,18 @@ class Vlr : public RoutingBase
     // bool lastBeaconRepSeqnumUnchanged = false;    // repState.sequencenumber sent in the last two beacons are the same, need to notify pneis asap if new rep seqNo received
     unsigned int selfRepSeqnum;       // rep seqNo when I'm rep
     std::map<VlrRingVID, Representative> representativeMap;   // used when representativeFixed=false, doesn't include myself
-    static const int representativeMapMaxSize = 6;         // max number of reps (excluding myself) in representativeMap, NOTE can include expired records
+    static const int representativeMapMaxSize = 10000;         // max number of reps (excluding myself) in representativeMap, NOTE can include expired records
+    int representativeMapActualMaxSize = 0;         // max number of reps (excluding myself) that have coexisted in representativeMap
 
     unsigned int totalNumBeaconSent = 0;
+    double totalNumBeacomSentWriteTime;
     static unsigned int totalNumRepSeqTimeout;
     static double firstRepSeqTimeoutTime;
+    static double finalRepSeqTimeoutTime;
+    static VlrRingVID finalRepSeqTimeoutNode;
+    static std::set<unsigned int> nodesRepSeqValid;   // when representativeFixed=true, record nodes whose repSeqExpirationTimer is scheduled
+    bool repFixedEarlyBeaconOnNewRepSeqNum;
+    bool repBeaconExcludeOldRepSeqNum;
 
     int vsetHalfCardinality;
     int vsetAndBackupHalfCardinality; // vsetHalfCardinality + backupVsetHalfCardinality
@@ -185,6 +194,7 @@ class Vlr : public RoutingBase
     std::map<VlrRingVID, simtime_t> recentSetupReqFrom; // not needed now bc multiple vset-routes btw vneis allowed -- nodes I've recently received setupReq from and accepted as vnei, map it to its expiration time (after which it'll be removed from this map)
     std::set<VlrRingVID> recentReplacedVneis;    // past vneis that I recently removed from vset because a closer vnei was added
     bool sendNotifyVsetToReplacedVnei;
+    const bool sendNotifyVsetOnDroppedSetupReq = true;  // whether to send NotifyVset to src of SetupReq dropped at me, where src is relatively close to me (in vset or pendingVset)
 
     std::map<VlrRingVID, LostPneiInfo> lostPneis;   // nodes to which I've sent repairLinkReq, they were once my pneis but are no longer connected, which broke some vset routes
     // std::map<VlrPathID, std::pair<VlrRingVID, VlrRingVID>> brokenRoutes;   // map broken vroute <pathid> to <lostPnei> (lost prevhop (I'll send repairLinkReq), lost nexthop (I'll receive repairLinkReq)) where lostPneis[lostPnei].brokenVroutes contains pathid
@@ -195,11 +205,12 @@ class Vlr : public RoutingBase
 
     // after receiving RepairLinkReq from srcVid, I may change nexthopVid of some broken vroutes srcBrokenPathids to srcVid, but srcVid doesn't know this until it receives my RepairLinkReply which builds tempPathid, if RepairLinkReply can't be forwarded and tempPathid is torn down, and if I have another temporary route to srcVid I won't consider srcBrokenPathids as broken, but they're still broken at srcVid bc it didn't receive my RepairLinkReply, inconsistent
     // thus I record tempPathid just sent and its srcBrokenPathids (brokenVroutes whose nexthopVid changed with new temporary route), if I receive Teardown soon after sending RepairLinkReply, meaning otherEnd hasn't received RepairLinkReply or updated prevhopVid to me for srcBrokenPathids, I'll try to ensure nexthopVid of srcBrokenPathids is unavailable so that they'll be torn down if can't be repaired 
-    std::map<VlrPathID, std::pair<std::vector<std::pair<VlrPathID, VlrRingVID>>, simtime_t>> recentTempRouteSent;  // tempPathid of RepairLinkReply that I recently sent out, map it to ([(srcBrokenPathid, old nexthopVid) ..], expireTime)
+    std::map<VlrPathID, std::pair<std::map<VlrPathID, VlrRingVID>, simtime_t>> recentTempRouteSent;  // tempPathid of RepairLinkReply that I recently sent out, map it to ({srcBrokenPathid, old nexthopVid}, expireTime)
 
     // local repair
     std::map<VlrRingVID, std::pair<std::set<VlrPathID>, simtime_t>> recentRepairLocalReqFrom;   // nodes I've recently received repairLocalReq from, map it to pathids in RepairLocalReqFlood.brokenPathids
     // std::map<VlrPathID, simtime_t>  recentRepairLocalBrokenVroutes;    // pathids for which I've recently sent repairLocalReply    Commented out bc pathids that I've recently repaired won't be broken (nexthop unavailable) thus won't be repaired again
+    std::map<VlrPathID, std::pair<std::vector<VlrRingVID>, simtime_t>> recentRepairLocalBrokenVroutes;   // pathids for which I've recently accepted repairLocalReply, map it to (p, prev of p, .., from] before I update prevhopVids based on linkTrace from p, these are other nodes in repairLocalReq.dstToPathidsMap that I expect to repair the pathid, whose repairLocalReply can override the repairLocalReply from p
     std::map<unsigned int, RepairLocalReqInfo> delayedRepairLocalReq;     // delay received repairLocalReq until I detect lost of pnei, map key is hash of RepairLocalReqInfo
 
     std::map<VlrPathID, simtime_t> dismantledRoutes;  // map one-direction vroute (has received Teardown) to its expiration time
@@ -226,6 +237,7 @@ class Vlr : public RoutingBase
     virtual void processFailedPacket(cPacket *packet, unsigned int pneiVid) override;
     virtual void writeRoutingTableToFile() override;
     virtual void recordCurrentNodeStats(const char *stage) override;
+    virtual std::set<VlrRingVID> convertVsetToSet() const override;
 
     // handling messages
     void processSelfMessage(cMessage *message);
@@ -351,6 +363,12 @@ class Vlr : public RoutingBase
     void processRepairLinkReply(RepairLinkReplyInt *replyIncoming, bool& pktForwarded);
     void forwardRepairLinkReply(RepairLinkReplyInt* replyOutgoing, bool& pktForwarded, const VlrPathID& newPathid, VlrRingVID msgPrevHopVid);
 
+    // handling RepairLinkFail
+    int computeRepairLinkFailByteLength(RepairLinkFailInt* msg) const;
+    void sendCreatedRepairLinkFail(RepairLinkFailInt *msg, const int& outGateIndex, bool computeChunkLength=true, double delay=0);
+    void processRepairLinkFail(RepairLinkFailInt *replyIncoming, bool& pktForwarded);
+    void forwardRepairLinkFail(RepairLinkFailInt* replyOutgoing, bool& pktForwarded, VlrRingVID msgPrevHopVid);
+
     // handling RepairRoute
     VlrRingVID getVlrOptionToNextHop(VlrIntUniPacket* msg, VlrRingVID nextHopVid, char nextHopIsUnavailable) const;
     void setRepairRoutePathids(RepairRouteInt *msg, const std::vector<VlrPathID>& pathids) const;
@@ -359,10 +377,11 @@ class Vlr : public RoutingBase
     void processRepairRoute(RepairRouteInt *msgIncoming, bool& pktForwarded);
 
     // handling NotifyVset
+    int computeNotifyVsetByteLength(NotifyVsetInt* msg) const;
     NotifyVsetInt* createNotifyVset(const VlrRingVID& dstVid, bool toVnei);
-    void sendCreatedNotifyVset(NotifyVsetInt *msg, const int& outGateIndex);
+    void sendCreatedNotifyVset(NotifyVsetInt *msg, const int& outGateIndex, bool computeChunkLength=true);
     void processNotifyVset(NotifyVsetInt *msgIncoming, bool& pktForwarded);
-    void forwardNotifyVset(NotifyVsetInt* msgIncoming, bool& pktForwarded);
+    void forwardNotifyVset(NotifyVsetInt* msgIncoming, bool& pktForwarded, bool withTrace);
 
     // handling RepairLocalReqFlood
     int computeRepairLocalReqFloodByteLength(RepairLocalReqFloodInt* repairReq) const;
@@ -388,9 +407,12 @@ class Vlr : public RoutingBase
     unsigned int getRoutePrevhopVidsDiffIndex(const std::vector<VlrRingVID>& vec1, const std::vector<VlrRingVID>& vec2) const;
 
     // routing
-    VlrRingVID findNextHop(VlrIntOption& vlrOption, VlrRingVID prevHopVid, VlrRingVID excludeVid=VLRRINGVID_NULL, bool allowTempRoute=false);
+    #define findNextHop(a,b, ...) findNextHop_internal(a,b, __FILE__, __LINE__,__VA_ARGS__)
+    VlrRingVID findNextHop_internal(VlrIntOption& vlrOption, VlrRingVID prevHopVid, const char* file_name, uint32_t linenumber, VlrRingVID excludeVid=VLRRINGVID_NULL, bool allowTempRoute=false, uint32_t parentlinenum=0);
     VlrRingVID findNextHopForSetupReply(VlrIntOption& vlrOption, VlrRingVID prevHopVid, VlrRingVID newnode, bool allowTempRoute=false);
-    VlrRingVID findNextHopForSetupReq(VlrIntOption& vlrOption, VlrRingVID prevHopVid, VlrRingVID dstVid, VlrRingVID newnode, bool allowTempRoute=true);
+    #define findNextHopForSetupReq(a,b, ...) findNextHopForSetupReq_internal(a,b, __FILE__, __LINE__,__VA_ARGS__)
+    VlrRingVID findNextHopForSetupReq_internal(VlrIntOption& vlrOption, VlrRingVID prevHopVid, const char* file_name, uint32_t linenumber, VlrRingVID dstVid, VlrRingVID newnode, bool allowTempRoute=true);
+    // VlrRingVID findNextHopForSetupReq(VlrIntOption& vlrOption, VlrRingVID prevHopVid, VlrRingVID dstVid, VlrRingVID newnode, bool allowTempRoute=true);
     unsigned int getNextHopIndexInTraceForSetupReq(const VlrIntVidVec& trace, unsigned int myIndexInTrace) const;
     unsigned int getNextHopIndexInTrace(VlrIntVidVec& trace, bool preferShort=true) const;
     std::pair<VlrRingVID, unsigned int> getClosestPneiTo(VlrRingVID targetVid, VlrRingVID excludeVid, bool checkInNetwork=false) const;
@@ -419,7 +441,7 @@ class Vlr : public RoutingBase
     void recordNewVnei(const VlrRingVID& newVnei);
 
     void processOtherVset(const VlrIntSetupPacket *setupPacket, const VlrRingVID& srcVid, bool addToEmpty=true);
-    bool pendingVsetAdd(VlrRingVID node, VlrRingVID heardFrom=VLRRINGVID_NULL, bool addToEmpty=true);
+    bool pendingVsetAdd(VlrRingVID node, VlrRingVID heardFrom=VLRRINGVID_NULL, bool addToEmpty=true, bool nodeAlive=true);
     void pendingVsetErase(VlrRingVID node);
     void vsetInsertRmPending(VlrRingVID node);
     bool vsetEraseAddPending(VlrRingVID node);
@@ -441,10 +463,12 @@ class Vlr : public RoutingBase
     void clearState(bool clearPsetAndRep);
     void cancelPendingVsetTimers();
     void cancelRepairLinkTimers();
-    std::set<VlrRingVID> convertVsetToSet() const;
     VlrRingVID readRepresentativeVidFromFile();
     /** print vset for EV_INFO purpose */
-    std::string printVsetToString() const;
+    std::string printVlrOptionToString(const VlrIntOption& vlrOption) const;
+    std::string printVsetToString(bool printVpath=false) const;
+    std::string printPendingVsetToString() const;
+    std::string printRepresentativeMapToString() const;
     std::string printRoutesToMeToString() const;
     void writeFirstRepSeqTimeoutToFile(bool writeAtFinish);
     void writeTotalNumBeacomSentToFile();

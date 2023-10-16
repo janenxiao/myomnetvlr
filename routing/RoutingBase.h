@@ -14,6 +14,7 @@
 #include <omnetpp.h>
 
 #include "vlr/Vlr_m.h"
+#include "configurator/RoutingConfigurator.h"
 
 using namespace omnetpp;
 
@@ -32,23 +33,28 @@ class RoutingBase : public cSimpleModule
 
       unsigned int lastBeaconSeqnum;   // rep seqNo forwarded in my last beacon, if rep wasn't included in my last beacon, lastBeaconSeqnum = 0 (I'll never broadcast my own rep seqNo as 0)
       bool lastBeaconSeqnumUnchanged;    // rep seqNo was sent in the last two beacons and was the same, need to notify pneis asap if new rep seqNo received
+      double lastHeardOldseqnum;      // (unused for now) last time I heard an old seqNo from this rep, extend removal time of this rep from representativeMap bc I may add it back with an old seqNo after removing it too early
 
       // static const unsigned int HOPCOUNT_INFINITY = 65534;
     };
 
   protected:
     unsigned int vid;
-    static std::vector<std::pair<double, std::vector<std::set<unsigned int>>>> vidRingRegistry;      // vidRingRegistry[0] (network partition stage 0): (time, [set contains vids in a connected component after time])
+    // static std::vector<std::pair<double, std::vector<std::set<unsigned int>>>> vidRingRegistry;      // vidRingRegistry[0] (network partition stage 0): (time, [set contains vids in a connected component after time])
     std::set<unsigned int> vidRingRegVset;
     static std::set<unsigned int> nodesVsetCorrect;
+    std::map<VlrRingVID, unsigned int> expiredErasedReps;    // {rep: expired rep seqNo} - nodes removed from representativeMap bc didn't hear from them for a while
 
     simsignal_t dropSignal;
 
+    RoutingConfigurator *routingConfig = nullptr;
+
     cMessage *startTimer = nullptr; // should be created and scheduled in initialize(), once invoked, call handleStartOperation()
     cMessage *failureSimulationTimer = nullptr; // time for me to simulate node/link failure
-    cMessage *vidRingRegVsetTimer = nullptr; // time for me to change vidRingRegVset according to vidRingRegistry
+    cMessage *vidRingRegVsetTimer = nullptr; // time for me to change vidRingRegVset according to vidRingRegistry, first timer is scheduled at t=2, otherwise it's used as timer to get routingConfig->vidRingRegistry or failureSimulationMap after RoutingConfigurator::initialize()
     cMessage *writeRoutingTableTimer = nullptr;   // timer to write vlrRoutingTable to write vlrRoutingTable at nodes to file
     cMessage *writeNodeStatsTimer = nullptr;   // timer to record nodeStats to allNodeRecords
+    cMessage *writeReceivedMsgAggTimer = nullptr;   // timer to record receivedMsgAggregate to allSendRecords
 
     // statistics collection
     std::vector<unsigned int> testDstList;  // predetermined list of node vids (read from testDstAssignmentFile) to send TestPacket
@@ -59,20 +65,25 @@ class RoutingBase : public cSimpleModule
     static bool resultTestCSVFileCreated;         // [ definition in VlrBase.cc file ] default false, first node that writes to result messages file should change this to true
     static const unsigned int allSendRecordsCapacity;
 
-    static std::vector<double> writeRoutingTableToFileTimes;  // time after start to write vlrRoutingTable to file
+    static const std::map<std::string, std::string> sendRecordStringShortVerMap;    // convert actual record field in allSendRecords to a shorter version to reduce record size
+
+    double recordReceivedMsgAggPeriod;
+    std::map<std::string, std::tuple<unsigned int, unsigned int, unsigned int>> receivedMsgAggregate; // map msgType to (number of messages receives, total hopcount, chunkByteLength), store received messages before writing a record to allSendRecords
+
+    std::vector<double> writeRoutingTableToFileTimes;  // time after start to write vlrRoutingTable to file
     static bool routingTableVidCSVFileCreated;         // [ definition in VlrBase.cc file ] default false, first node that writes to the file should change this to true
 
-    static std::vector<double> writeNodeStatsTimes;  // time after start to record nodeStats to allNodeRecords
+    std::vector<double> writeNodeStatsTimes;  // time after start to record nodeStats to allNodeRecords
 
     // failure simulation
-    static std::map<unsigned int, std::vector<std::tuple<double, std::string, std::set<unsigned int>>>> failureSimulationMap;  // {node1, [(100, "stop", {node2, node3})]} means node1 stops processing messages from node2 and node3 after 100s; {node1, [(100, "stop", {})]} means node1 stops processing messages (node failure) after 100s
+    // static std::map<unsigned int, std::vector<std::tuple<double, std::string, std::set<unsigned int>>>> failureSimulationMap;  // {node1, [(100, "stop", {node2, node3})]} means node1 stops processing messages from node2 and node3 after 100s; {node1, [(100, "stop", {})]} means node1 stops processing messages (node failure) after 100s
     std::map<unsigned int, int> failureSimulationPneiVidMap;   // pnei vids from which I won't process messages in order to simulate link failures, map pnei to its gate index at me
     std::set<int> failureSimulationPneiGates;   // pnei gate indexes from which I won't process messages in order to simulate link failures
     std::set<unsigned int> failureSimulationUnaddedPneiVids;  // pnei vids that haven't been added to failureSimulationPneiVidMap bc I don't know their corresponding gete index yet, once I receive a msg from any of them, I'll add it to failureSimulationPneiVidMap
     bool selfNodeFailure = false;   // if true, I'm simulating node failure and I won't process any VLR messages
     std::map<int, FailedPacketDelayTimer *> failureGateToPacketMap;   // store failed packet to some gateIndex to process later, simulate time for sending a packet multiple times b4 signaling a link break 
 
-    double simulateBeaconLostRate;    // value in range [0, 1), ratio of beacons lost because of collision, default 0, e.g., 0.1 means 10% probability that I'll ignore a received beacon to simulate collision
+    double simulateBeaconLossRate;    // value in range [0, 1), ratio of beacons lost because of collision, default 0, e.g., 0.1 means 10% probability that I'll ignore a received beacon to simulate collision
 
   public:
     virtual ~RoutingBase();
@@ -104,6 +115,8 @@ class RoutingBase : public cSimpleModule
 
     static std::vector<unsigned int> removeLoopInTrace(const std::vector<unsigned int>& trace);
 
+    static std::map<std::string, std::string> initializeSendRecordStringShortVerMap();
+
   protected:
     virtual void initialize() override;
     // virtual void handleMessage(cMessage *msg);
@@ -120,6 +133,8 @@ class RoutingBase : public cSimpleModule
     void processWriteRoutingTableTimer();
     // handling write nodeStats timer timeout
     void processWriteNodeStatsTimer();
+    // handling write receivedMsgAggregate timer timeout
+    void processWriteReceivedMsgAggTimer();
 
     virtual void handleStartOperation();
     virtual void handleStopOperation() = 0;
@@ -129,15 +144,45 @@ class RoutingBase : public cSimpleModule
     virtual void processFailedPacket(cPacket *packet, unsigned int pneiVid) = 0;
     virtual void writeRoutingTableToFile() = 0;
     virtual void recordCurrentNodeStats(const char *stage) = 0;
+    virtual std::set<VlrRingVID> convertVsetToSet() const = 0;
 
     // const functions
     /** return numHalf nodes close to me in ccw/cw direction in traceSet */
     std::vector<VlrRingVID> getCloseNodesInSet(int numHalf, const std::set<VlrRingVID>& traceSet) const;
 
+    // template<class VidMap>
+    // inline std::vector<VlrRingVID> getCloseNodesInMap(int numHalf, const VidMap& vidMap) const
+    // {
+    //     std::vector<VlrRingVID> closeVec;
+    //     if (!vidMap.empty()) {
+    //         auto itrup = vidMap.lower_bound(vid);    // itrup points to closest cw node in vidMap
+    //         advanceIteratorWrapAround(itrup, 0, vidMap.begin(), vidMap.end());
+    //         auto itrlow = itrup;
+    //         if (itrup->first == vid)
+    //             advanceIteratorWrapAround(itrup, 1, vidMap.begin(), vidMap.end());
+
+    //         for (int i = 0; i < numHalf; ++i) {
+    //             if (itrup == itrlow && i > 0 || itrup->first == vid)   // when i == 0, itrup == itrlow but itrup hasn't been examined yet; if *itrup == vid, I am the only node in vidMap 
+    //                 break;
+    //             else {
+    //                 closeVec.push_back(itrup->first);
+    //                 advanceIteratorWrapAround(itrlow, -1, vidMap.begin(), vidMap.end());
+    //                 if (itrlow == itrup)
+    //                     break;
+    //                 else {
+    //                     closeVec.push_back(itrlow->first);
+    //                     advanceIteratorWrapAround(itrup, 1, vidMap.begin(), vidMap.end());
+    //                 }
+    //             }
+    //         }
+    //     }
+    //     return closeVec;
+    // }
+
     template<class VidMap>
-    inline std::vector<VlrRingVID> getCloseNodesInMap(int numHalf, const VidMap& vidMap) const
+    inline std::set<VlrRingVID> getCloseNodesInMapToSet(int numHalf, const VidMap& vidMap) const
     {
-        std::vector<VlrRingVID> closeVec;
+        std::set<VlrRingVID> closeSet;
         if (!vidMap.empty()) {
             auto itrup = vidMap.lower_bound(vid);    // itrup points to closest cw node in vidMap
             advanceIteratorWrapAround(itrup, 0, vidMap.begin(), vidMap.end());
@@ -149,23 +194,23 @@ class RoutingBase : public cSimpleModule
                 if (itrup == itrlow && i > 0 || itrup->first == vid)   // when i == 0, itrup == itrlow but itrup hasn't been examined yet; if *itrup == vid, I am the only node in vidMap 
                     break;
                 else {
-                    closeVec.push_back(itrup->first);
+                    closeSet.insert(itrup->first);
                     advanceIteratorWrapAround(itrlow, -1, vidMap.begin(), vidMap.end());
                     if (itrlow == itrup)
                         break;
                     else {
-                        closeVec.push_back(itrlow->first);
+                        closeSet.insert(itrlow->first);
                         advanceIteratorWrapAround(itrup, 1, vidMap.begin(), vidMap.end());
                     }
                 }
             }
         }
-        return closeVec;
+        return closeSet;
     }
 
     VlrPathID genPathID(VlrRingVID dstVid) const;
 
-    void initializeFailureSimulationMap();
+    // void initializeFailureSimulationMap();
     void initializeSelfTestDstList();
     void initializeWriteRoutingTableToFileTimes();
     void initializeWriteNodeStatsTimes();
@@ -176,6 +221,11 @@ class RoutingBase : public cSimpleModule
     void recordNodeStatsRecord(const char *infoStr);
     void writeToResultNodeFile();
     void writeToResultMessageFile();
+    void writeReceivedMsgAggToRecords();
+
+    std::string recordSimTimeToString(simtime_t_cref time, int precision) const;
+    std::string recordDoubleToString(double num, int precision) const;
+    std::string recordMessageFieldToString(const char *msgType) const;
 
   public:
     // must overload operator<< for variables being WATCH()

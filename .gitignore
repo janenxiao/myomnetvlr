@@ -1,8 +1,9 @@
 # Directories
 out/
 .settings/
-networks/
 results/
+
+#networks/
 
 # Prerequisites
 *.d

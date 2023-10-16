@@ -24,3 +24,15 @@ and for every packet it randomly chooses a destination from the list.
 There are two apps provided: App generates packets with exponential inter-arrival
 times, while BurstyApp alternates between active and idle periods. BurstyApp's
 implementation demonstrates the use of the FSMs (Finite State Machine).
+
+=======
+About the folder:
+
+Start with one of the omnetpp*.ini files, different files target different testing scenarios,
+such that multiple scenarios can be run at the same time. 
+
+processResultCSVomvlr.py processes nodeStats_*.csv and sendRecords_*.csv files in results/
+generated from OMNeT simulations, and generates several new files such as PGedgelist_*.csv,
+PGpickle_*.gpickle, numvroutes_*.csv, etc., to prepare data for plotting.
+
+results/plotting/pandas_graph_omvlr.py then utilizes those files for plotting with matplotlib.

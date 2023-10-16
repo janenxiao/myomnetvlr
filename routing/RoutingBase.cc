@@ -12,12 +12,13 @@
 #include <fstream>      // for reading/writing to file
 #include <sstream>      // for std::stringstream, std::ostringstream, std::istringstream
 #include <algorithm>      // for std::copy(..), std::find(..)
+#include <iomanip>      // for std::setprecision()
 
 
 namespace omnetvlr {
 
-std::map<unsigned int, std::vector<std::tuple<double, std::string, std::set<unsigned int>>>> RoutingBase::failureSimulationMap;
-std::vector<std::pair<double, std::vector<std::set<unsigned int>>>> RoutingBase::vidRingRegistry;
+// std::map<unsigned int, std::vector<std::tuple<double, std::string, std::set<unsigned int>>>> RoutingBase::failureSimulationMap;
+// std::vector<std::pair<double, std::vector<std::set<unsigned int>>>> RoutingBase::vidRingRegistry;
 std::vector<std::string> RoutingBase::allSendRecords;
 std::vector<std::string> RoutingBase::allNodeRecords;
 bool RoutingBase::resultNodeCSVFileCreated = false;
@@ -26,9 +27,11 @@ const unsigned int RoutingBase::allSendRecordsCapacity = 65536;
 std::set<unsigned int> RoutingBase::nodesVsetCorrect;
 
 bool RoutingBase::routingTableVidCSVFileCreated = false;
-std::vector<double> RoutingBase::writeRoutingTableToFileTimes;
+// std::vector<double> RoutingBase::writeRoutingTableToFileTimes;
 
-std::vector<double> RoutingBase::writeNodeStatsTimes;
+// std::vector<double> RoutingBase::writeNodeStatsTimes;
+
+const std::map<std::string, std::string> RoutingBase::sendRecordStringShortVerMap = RoutingBase::initializeSendRecordStringShortVerMap();
 
 
 RoutingBase::~RoutingBase()
@@ -38,6 +41,7 @@ RoutingBase::~RoutingBase()
     cancelAndDelete(vidRingRegVsetTimer);
     cancelAndDelete(writeRoutingTableTimer);
     cancelAndDelete(writeNodeStatsTimer);
+    cancelAndDelete(writeReceivedMsgAggTimer);
 
     for (auto& elem : failureGateToPacketMap)
         cancelAndDelete(elem.second);
@@ -125,6 +129,23 @@ std::vector<unsigned int> RoutingBase::removeLoopInTrace(const std::vector<unsig
         }
     }
     return newTrace;
+}
+
+std::map<std::string, std::string> RoutingBase::initializeSendRecordStringShortVerMap()
+{
+    std::map<std::string, std::string> m;
+    m["SetupReq"] = "S";
+    m["SetupReply"] = "Y";
+    m["SetupFail"] = "F";
+    m["Teardown"] = "D";
+    m["TestPacket"] = "T";
+    m["RepairLinkReqFlood"] = "P";
+    m["RepairLocalReqFlood"] = "L";
+    m["sent"] = "s";
+    m["arrived"] = "a";
+    m["received"] = "r";
+    m["dropped"] = "d";
+    return m;
 }
 
 
@@ -215,18 +236,24 @@ VlrPathID RoutingBase::genPathID(VlrRingVID dstVid) const
 void RoutingBase::initialize()
 {
     vid = getParentModule()->par("address");
-    if (vidRingRegistry.size() < 1)
-        vidRingRegistry.push_back({0, {{}}});    // initialize vidRingRegistry[0]
-    vidRingRegistry[0].second[0].insert(vid);      // since entire network is connected at stage 0, vid is always inserted into vidRingRegistry[0][0]
+    // if (vidRingRegistry.size() < 1)
+    //     vidRingRegistry.push_back({0, {{}}});    // initialize vidRingRegistry[0]
 
     dropSignal = registerSignal("drop");
 
+    routingConfig = check_and_cast<RoutingConfigurator*>(getModuleByPath(par("routingConfigModule").stringValue()));
+
     startTimer = new cMessage("startTimer");
-    scheduleAt(0, startTimer);
     failureSimulationTimer = new cMessage("failureSimulationTimer");
     vidRingRegVsetTimer = new cMessage("vidRingRegVsetTimer");
     writeRoutingTableTimer = new cMessage("writeRoutingTableTimer");
     writeNodeStatsTimer = new cMessage("writeNodeStatsTimer");
+    writeReceivedMsgAggTimer = new cMessage("writeReceivedMsgAggTimer");
+
+    // schedule timer to initialize vidRingRegVsetTimer and failureSimulationTimer after RoutingConfigurator::initialize()
+    scheduleAt(0, vidRingRegVsetTimer);
+    // schedule timer to do handleStartOperation()
+    scheduleAt(0.01, startTimer);
 
     // initialize static non-const variables for multiple ${repetition} or ${runnumber} bc cmdenv runs simulations in the same process, this means that e.g. if one simulation run writes a global variable, subsequent runs will also see the change
     resultNodeCSVFileCreated = false;
@@ -236,23 +263,17 @@ void RoutingBase::initialize()
     ASSERT(allSendRecords.empty());
     ASSERT(allNodeRecords.empty());
 
-    simulateBeaconLostRate = par("simulateBeaconLostRate");
+    simulateBeaconLossRate = par("simulateBeaconLossRate");
+    recordReceivedMsgAggPeriod = par("recordReceivedMsgAggPeriod");
 
-    // initialize failureSimulationMap
-    if (failureSimulationMap.empty()) {
-        // failureSimulationMap = {
-        //     {2, {{80, "stop", {4}}}},
-        // };
-    }
-    initializeFailureSimulationMap();   // first node read failure simulation file to initialize failureSimulationMap if it's empty
-    auto failureSimulationItr = failureSimulationMap.find(vid);
-    if (failureSimulationItr != failureSimulationMap.end()) {
-        const auto& tuple = failureSimulationItr->second.front();
-        EV_DEBUG << "Scheduling initial failure simulation timer at " << std::get<0>(tuple) << endl;
-        scheduleAt(std::get<0>(tuple), failureSimulationTimer);
-    }
-    // schedule first vidRingRegVsetTimer to set vidRingRegVset based on physical topo
-    scheduleAt(2, vidRingRegVsetTimer);     // schedule at t=2 to initialize vidRingRegVset after all nodes have registered itself in vidRingRegistry[0] in initialize(), if failure simulated at start, failure should be scheduled at t=1
+    // Commented out bc vidRingRegistry and failureSimulationMap now variable of RoutingConfigurator
+    // // initialize failureSimulationMap
+    // if (failureSimulationMap.empty()) {
+    //     // failureSimulationMap = {
+    //     //     {2, {{80, "stop", {4}}}},
+    //     // };
+    // }
+    // initializeFailureSimulationMap();   // first node read failure simulation file to initialize failureSimulationMap if it's empty
 
     // schedule first writeRoutingTableTimer if file provided
     initializeWriteRoutingTableToFileTimes();
@@ -331,8 +352,8 @@ void RoutingBase::processFailedPacketDelayTimer(FailedPacketDelayTimer *failedpk
 void RoutingBase::processFailureSimulationTimer()
 {
     EV_INFO << "Processing failure simulation timer at node " << vid << endl;
-    auto failureSimulationItr = failureSimulationMap.find(vid);
-    if (failureSimulationItr != failureSimulationMap.end()) {
+    auto failureSimulationItr = routingConfig->failureSimulationMap.find(vid);
+    if (failureSimulationItr != routingConfig->failureSimulationMap.end()) {
         // find the timestamp that triggered this failure simulation timeout
         simtime_t currTime = simTime();
         int i = failureSimulationItr->second.size() -1;
@@ -364,47 +385,90 @@ void RoutingBase::processFailureSimulationTimer()
 void RoutingBase::processVidRingRegVsetTimer(int numHalf)
 {
     EV_INFO << "Processing vidRingRegVsetTimer at node " << vid << endl;
-    // find the timestamp that triggered this timer
     simtime_t currTime = simTime();
-    int i = vidRingRegistry.size() -1;
-    for ( ; i >= 0; i--) {
-        if (currTime >= vidRingRegistry.at(i).first)
-            break;
+    if (currTime < 2) {     // continue initialize(), bc RoutingConfigurator::initialize() should've completed after t=0
+        // register my vid in vidRingRegistry
+        routingConfig->vidRingRegistry[0].second[0].insert(vid);      // since entire network is connected at stage 0, vid is always inserted into vidRingRegistry[0][0]
+        // schedule first failureSimulationTimer
+        auto failureSimulationItr = routingConfig->failureSimulationMap.find(vid);
+        if (failureSimulationItr != routingConfig->failureSimulationMap.end()) {
+            const auto& tuple = failureSimulationItr->second.front();
+            EV_DEBUG << "Scheduling initial failure simulation timer at " << std::get<0>(tuple) << endl;
+            scheduleAt(std::get<0>(tuple), failureSimulationTimer);
+        }
+        // schedule first vidRingRegVsetTimer to set vidRingRegVset based on physical topo
+        scheduleAt(2, vidRingRegVsetTimer);     // schedule at t=2 to initialize vidRingRegVset after all nodes have registered itself in vidRingRegistry[0] in initialize(), if failure simulated at start, failure should be scheduled at t=1
     }
-    ASSERT(i >= 0);     // timer has timed out bc a timestamp in vidRingRegistry vector has been reached
-    // reset vidRingRegVset based on vidRingRegistry
-    vidRingRegVset.clear();
-    
-    const auto& componentVec = vidRingRegistry.at(i).second;      // list of sets, each with connected nodes in a connected component after currTime
-    for (auto componentItr = componentVec.begin(); componentItr != componentVec.end(); ++componentItr) {
-        const auto& vidSet = *componentItr;
-        auto vidItr = vidSet.find(vid);
-        if (vidItr != vidSet.end()) {
-            // find numHalf nodes close to me in ccw/cw direction in traceSet
-            std::vector<VlrRingVID> closeVec = getCloseNodesInSet(numHalf, vidSet);    // numHalf ccw/cw nodes close to me in traceSet
-            ASSERT(closeVec.size() == 2 * numHalf);
-            // NOTE if pass an output iterator vidRingRegVset.begin() directly to std::copy, you must make sure it points to a range that is at least large enough to hold the input range, otherwise needs std::inserter
-            std::copy(closeVec.begin(), closeVec.end(), std::inserter(vidRingRegVset, vidRingRegVset.begin()));     // copy closeVec to vidRingRegVset
-            break;      // found my vid in a component
+    else {    // change vidRingRegVset based on vidRingRegistry
+        // find the timestamp that triggered this timer
+        int i = routingConfig->vidRingRegistry.size() -1;
+        for ( ; i >= 0; i--) {
+            if (currTime >= routingConfig->vidRingRegistry.at(i).first)
+                break;
+        }
+        ASSERT(i >= 0);     // timer has timed out bc a timestamp in vidRingRegistry vector has been reached
+        // reset vidRingRegVset based on vidRingRegistry
+        vidRingRegVset.clear();
+        
+        const auto& componentVec = routingConfig->vidRingRegistry.at(i).second;      // list of sets, each with connected nodes in a connected component after currTime
+        for (auto componentItr = componentVec.begin(); componentItr != componentVec.end(); ++componentItr) {
+            const auto& vidSet = *componentItr;
+            auto vidItr = vidSet.find(vid);
+            if (vidItr != vidSet.end()) {
+                // find numHalf nodes close to me in ccw/cw direction in traceSet
+                std::vector<VlrRingVID> closeVec = getCloseNodesInSet(numHalf, vidSet);    // numHalf ccw/cw nodes close to me in traceSet
+                ASSERT(closeVec.size() == 2 * numHalf);
+                // NOTE if pass an output iterator vidRingRegVset.begin() directly to std::copy, you must make sure it points to a range that is at least large enough to hold the input range, otherwise needs std::inserter
+                std::copy(closeVec.begin(), closeVec.end(), std::inserter(vidRingRegVset, vidRingRegVset.begin()));     // copy closeVec to vidRingRegVset
+
+                auto nodesVsetCorrectItr = nodesVsetCorrect.find(vid);
+                if (nodesVsetCorrectItr != nodesVsetCorrect.end() && convertVsetToSet() != vidRingRegVset) {     // if I had correct vset but it's no longer correct bc vidRingRegVset has changed
+                    nodesVsetCorrect.erase(nodesVsetCorrectItr);
+
+                    std::ostringstream s;
+                    s << "vsetIncorrect: vset=" << convertVsetToSet() << " vidRingRegVset=" << vidRingRegVset << " numNodesVsetCorrect=" << nodesVsetCorrect.size();
+                    recordNodeStatsRecord(/*infoStr=*/s.str().c_str());                
+                }
+                break;      // found my vid in a component
+            }
+        }
+        // schedule next vidRingRegVsetTimer
+        if (i < routingConfig->vidRingRegistry.size() -1)     // more physical topo change to schedule
+            scheduleAt(routingConfig->vidRingRegistry.at(i+1).first, vidRingRegVsetTimer);
+
+        // rep seqNo would be reset back to 0 when a rep node fails and restarts 
+        if (i > 0) {    // this isn't the first physical topo
+            // compute total number of alive nodes at current time
+            unsigned int numNodesAlive = 0, numNodesAlivePrev = 0;
+            for (auto componentItr = componentVec.begin(); componentItr != componentVec.end(); ++componentItr) {
+                const auto& vidSet = *componentItr;
+                numNodesAlive += vidSet.size();
+            }
+            // compute total number of alive nodes at previous time
+            const auto& componentVecPrev = routingConfig->vidRingRegistry.at(i-1).second;
+            for (auto componentItr = componentVecPrev.begin(); componentItr != componentVecPrev.end(); ++componentItr) {
+                const auto& vidSet = *componentItr;
+                numNodesAlivePrev += vidSet.size();
+            }
+            if (numNodesAlive > numNodesAlivePrev)  // there are nodes that have come back to life
+                expiredErasedReps.clear();
         }
     }
-    // schedule next vidRingRegVsetTimer
-    if (i < vidRingRegistry.size() -1)     // more physical topo change to schedule
-        scheduleAt(vidRingRegistry.at(i+1).first, vidRingRegVsetTimer);
+
 }
 
 VlrRingVID RoutingBase::getRandomVidInRegistry()
 {
     // find the latest timestamp <= current time
     simtime_t currTime = simTime();
-    int i = vidRingRegistry.size() -1;
+    int i = routingConfig->vidRingRegistry.size() -1;
     for ( ; i >= 0; i--) {
-        if (currTime >= vidRingRegistry.at(i).first)
+        if (currTime >= routingConfig->vidRingRegistry.at(i).first)
             break;
     }
     ASSERT(i >= 0);     // i = 0 if no failure partition assignment file provided, i.e. vidRingRegistry.size() == 1 recorded in initialize()
 
-    const auto& componentVec = vidRingRegistry.at(i).second;      // list of sets, each with connected nodes in a connected component after currTime
+    const auto& componentVec = routingConfig->vidRingRegistry.at(i).second;      // list of sets, each with connected nodes in a connected component after currTime
     for (auto componentItr = componentVec.begin(); componentItr != componentVec.end(); ++componentItr) {
         const auto& vidSet = *componentItr;
         auto vidItr = vidSet.find(vid);
@@ -449,193 +513,193 @@ void RoutingBase::handleStartOperation()
     
 }
 
-void RoutingBase::initializeFailureSimulationMap()
-{
-    if (failureSimulationMap.empty()) {     // if failure simulation file provided, only one node should initialize failureSimulationMap
-        // get failure times
-        std::vector<double> failureOpTimeList;  // must be set before reading failure into failureSimulationMap
-        const char *failureTimesPar = par("failureSimulationOpTimes");
-        if (strlen(failureTimesPar) > 0) {    // failure operation times string provided
-            cStringTokenizer tokenizer(failureTimesPar, /*delimiters=*/", ");
-            const char *token;
-            while ((token = tokenizer.nextToken()) != nullptr)
-                failureOpTimeList.push_back((double)atoi(token));
-        }
+// void RoutingBase::initializeFailureSimulationMap()
+// {
+//     if (failureSimulationMap.empty()) {     // if failure simulation file provided, only one node should initialize failureSimulationMap
+//         // get failure times
+//         std::vector<double> failureOpTimeList;  // must be set before reading failure into failureSimulationMap
+//         const char *failureTimesPar = par("failureSimulationOpTimes");
+//         if (strlen(failureTimesPar) > 0) {    // failure operation times string provided
+//             cStringTokenizer tokenizer(failureTimesPar, /*delimiters=*/", ");
+//             const char *token;
+//             while ((token = tokenizer.nextToken()) != nullptr)
+//                 failureOpTimeList.push_back((double)atoi(token));
+//         }
 
-        const char *startstr = "operation=";
-        // process link failure simulation file
-        const char *fname = par("failureLinkSimulationFile");
-        if (strlen(fname) > 0) {    // failure link simulation file provided
-            std::ifstream vidFile(fname);
-            if (!vidFile.good())
-                throw cRuntimeError("Unable to load failureLink assignment file");
+//         const char *startstr = "operation=";
+//         // process link failure simulation file
+//         const char *fname = par("failureLinkSimulationFile");
+//         if (strlen(fname) > 0) {    // failure link simulation file provided
+//             std::ifstream vidFile(fname);
+//             if (!vidFile.good())
+//                 throw cRuntimeError("Unable to load failureLink assignment file");
             
-            // if (failureOpTimeList.size() == 0)
-            //     throw cRuntimeError("At least one failure operation time must be specified in the parameter!");
+//             // if (failureOpTimeList.size() == 0)
+//             //     throw cRuntimeError("At least one failure operation time must be specified in the parameter!");
 
-            int failureOpTimeIndex = 0;
-            double failureLinkSimulationStartTime = 0;
-            std::string operation;
+//             int failureOpTimeIndex = 0;
+//             double failureLinkSimulationStartTime = 0;
+//             std::string operation;
             
-            unsigned int nodeVid;
-            std::string line;
-            while (std::getline(vidFile, line)) {   // for each line in file
-                if (line.rfind(startstr, 0) == 0) { // line begins with startstr
-                    cStringTokenizer tokenizer(line.c_str() + strlen(startstr), /*delimiters=*/", ");    // start parsing after startstr
-                    const char *token = tokenizer.nextToken();
-                    ASSERT(token != nullptr);
-                    // failureLinkSimulationStartTime = (double)atoi(token);
-                    // token = tokenizer.nextToken();
-                    // ASSERT(token != nullptr);
-                    operation = token;
-                    ASSERT(failureOpTimeIndex < failureOpTimeList.size());
-                    failureLinkSimulationStartTime = failureOpTimeList[failureOpTimeIndex++];
-                } else {
-                    std::istringstream iss(line);
-                    std::string token;
-                    std::vector<unsigned int> vidlist;
-                    while(std::getline(iss, token, ',')) {  // split line with delimiter character ','
-                        try{
-                            nodeVid = std::stoul(token, nullptr, 0); // base=0: base used is determined by format in vidstr
-                            vidlist.push_back(nodeVid);
-                        }
-                        catch (std::exception& e) {
-                            throw cRuntimeError("Error to parse token \"%s\" in failureLink assignment file into unsigned int: %s", token.c_str(), e.what());
-                        }
-                    }
-                    ASSERT(vidlist.size() == 2);
-                    ASSERT(failureLinkSimulationStartTime > 0);
-                    // append link if either link end is in failureSimulationMap
-                    auto failureSimulationItr = failureSimulationMap.find(vidlist[0]);
-                    if (failureSimulationItr != failureSimulationMap.end()) {
-                        auto& tuple = failureSimulationItr->second.back();
-                        if (std::get<0>(tuple) < failureLinkSimulationStartTime)
-                            failureSimulationItr->second.push_back({failureLinkSimulationStartTime, operation, {vidlist[1]}});
-                        else
-                            std::get<2>(tuple).insert(vidlist[1]);
-                    }
-                    else if ((failureSimulationItr = failureSimulationMap.find(vidlist[1])) != failureSimulationMap.end()) {
-                        auto& tuple = failureSimulationItr->second.back();
-                        if (std::get<0>(tuple) < failureLinkSimulationStartTime)
-                            failureSimulationItr->second.push_back({failureLinkSimulationStartTime, operation, {vidlist[0]}});
-                        else
-                            std::get<2>(tuple).insert(vidlist[0]);
-                    }
-                    else    // if neither link end is in failureSimulationMap, insert failureSimulationMap[vidlist[0]]
-                        failureSimulationMap.insert({vidlist[0], {{failureLinkSimulationStartTime, operation, {vidlist[1]}}}});
-                }
-            }
-            EV_INFO << "Initialized failureSimulationMap with failureLink assignment file" << endl;
-            // for (const auto& mappair : failureSimulationMap) {
-            //     EV_INFO << mappair.first << " [";
-            //     for (const auto& tuple : mappair.second)
-            //         EV_INFO << std::get<0>(tuple) << " " << std::get<1>(tuple) << " " << std::get<2>(tuple) << " ";
-            //     EV_INFO << "]";
-            // }
+//             unsigned int nodeVid;
+//             std::string line;
+//             while (std::getline(vidFile, line)) {   // for each line in file
+//                 if (line.rfind(startstr, 0) == 0) { // line begins with startstr
+//                     cStringTokenizer tokenizer(line.c_str() + strlen(startstr), /*delimiters=*/", ");    // start parsing after startstr
+//                     const char *token = tokenizer.nextToken();
+//                     ASSERT(token != nullptr);
+//                     // failureLinkSimulationStartTime = (double)atoi(token);
+//                     // token = tokenizer.nextToken();
+//                     // ASSERT(token != nullptr);
+//                     operation = token;
+//                     ASSERT(failureOpTimeIndex < failureOpTimeList.size());
+//                     failureLinkSimulationStartTime = failureOpTimeList[failureOpTimeIndex++];
+//                 } else {
+//                     std::istringstream iss(line);
+//                     std::string token;
+//                     std::vector<unsigned int> vidlist;
+//                     while(std::getline(iss, token, ',')) {  // split line with delimiter character ','
+//                         try{
+//                             nodeVid = std::stoul(token, nullptr, 0); // base=0: base used is determined by format in vidstr
+//                             vidlist.push_back(nodeVid);
+//                         }
+//                         catch (std::exception& e) {
+//                             throw cRuntimeError("Error to parse token \"%s\" in failureLink assignment file into unsigned int: %s", token.c_str(), e.what());
+//                         }
+//                     }
+//                     ASSERT(vidlist.size() == 2);
+//                     ASSERT(failureLinkSimulationStartTime > 0);
+//                     // append link if either link end is in failureSimulationMap
+//                     auto failureSimulationItr = failureSimulationMap.find(vidlist[0]);
+//                     if (failureSimulationItr != failureSimulationMap.end()) {
+//                         auto& tuple = failureSimulationItr->second.back();
+//                         if (std::get<0>(tuple) < failureLinkSimulationStartTime)
+//                             failureSimulationItr->second.push_back({failureLinkSimulationStartTime, operation, {vidlist[1]}});
+//                         else
+//                             std::get<2>(tuple).insert(vidlist[1]);
+//                     }
+//                     else if ((failureSimulationItr = failureSimulationMap.find(vidlist[1])) != failureSimulationMap.end()) {
+//                         auto& tuple = failureSimulationItr->second.back();
+//                         if (std::get<0>(tuple) < failureLinkSimulationStartTime)
+//                             failureSimulationItr->second.push_back({failureLinkSimulationStartTime, operation, {vidlist[0]}});
+//                         else
+//                             std::get<2>(tuple).insert(vidlist[0]);
+//                     }
+//                     else    // if neither link end is in failureSimulationMap, insert failureSimulationMap[vidlist[0]]
+//                         failureSimulationMap.insert({vidlist[0], {{failureLinkSimulationStartTime, operation, {vidlist[1]}}}});
+//                 }
+//             }
+//             EV_INFO << "Initialized failureSimulationMap with failureLink assignment file" << endl;
+//             // for (const auto& mappair : failureSimulationMap) {
+//             //     EV_INFO << mappair.first << " [";
+//             //     for (const auto& tuple : mappair.second)
+//             //         EV_INFO << std::get<0>(tuple) << " " << std::get<1>(tuple) << " " << std::get<2>(tuple) << " ";
+//             //     EV_INFO << "]";
+//             // }
             
-        } else {
-            // process node failure simulation file
-            const char *fname = par("failureNodeSimulationFile");
-            if (strlen(fname) > 0) {    // failure link simulation file provided
-                std::ifstream vidFile(fname);
-                if (!vidFile.good())
-                    throw cRuntimeError("Unable to load failureNode assignment file");
+//         } else {
+//             // process node failure simulation file
+//             const char *fname = par("failureNodeSimulationFile");
+//             if (strlen(fname) > 0) {    // failure link simulation file provided
+//                 std::ifstream vidFile(fname);
+//                 if (!vidFile.good())
+//                     throw cRuntimeError("Unable to load failureNode assignment file");
 
-                int failureOpTimeIndex = 0;
-                double failureNodeSimulationStartTime = 0;
-                std::string operation;
+//                 int failureOpTimeIndex = 0;
+//                 double failureNodeSimulationStartTime = 0;
+//                 std::string operation;
                 
-                unsigned int nodeVid;
-                std::string line;
-                while (std::getline(vidFile, line)) {   // for each line in file
-                    if (line.rfind(startstr, 0) == 0) { // line begins with startstr
-                        cStringTokenizer tokenizer(line.c_str() + strlen(startstr), /*delimiters=*/", ");    // start parsing after startstr
-                        const char *token = tokenizer.nextToken();
-                        ASSERT(token != nullptr);
-                        operation = token;
-                        ASSERT(failureOpTimeIndex < failureOpTimeList.size());
-                        failureNodeSimulationStartTime = failureOpTimeList[failureOpTimeIndex++];
-                    } else {
-                        std::istringstream iss(line);
-                        std::string token;
-                        std::vector<unsigned int> vidlist;
-                        while(std::getline(iss, token, ',')) {  // split line with delimiter character ','
-                            try{
-                                nodeVid = std::stoul(token, nullptr, 0); // base=0: base used is determined by format in vidstr
-                                vidlist.push_back(nodeVid);
-                            }
-                            catch (std::exception& e) {
-                                throw cRuntimeError("Error to parse token \"%s\" in failureLink assignment file into unsigned int: %s", token.c_str(), e.what());
-                            }
-                        }
-                        ASSERT(vidlist.size() == 1);
-                        ASSERT(failureNodeSimulationStartTime > 0);
-                        // append link if either link end is in failureSimulationMap
-                        auto failureSimulationItr = failureSimulationMap.find(vidlist[0]);
-                        if (failureSimulationItr == failureSimulationMap.end())     // failureNode doesn't already exist in failureSimulationMap
-                            failureSimulationMap.insert({vidlist[0], {{failureNodeSimulationStartTime, operation, {}}}});
-                        else {
-                            auto& tuple = failureSimulationItr->second.back();
-                            ASSERT(std::get<0>(tuple) < failureNodeSimulationStartTime);    // node failure of vidlist[0] at failureNodeSimulationStartTime isn't already scheduled
-                            failureSimulationItr->second.push_back({failureNodeSimulationStartTime, operation, {}});
-                        }
-                    }
-                }
-                EV_INFO << "Initialized failureSimulationMap with failureNode assignment file" << endl;
-            }
-        }
-        if (!failureSimulationMap.empty()) {    // if failure scheduled, read failure partition assignment file into vidRingRegistry
-            const char *fname = par("failureRingPartitionFile");
-            // if (strlen(fname) == 0)
-            //     throw cRuntimeError("Failure simulated but failure partition assignment file not provided");
-            if (strlen(fname) > 0) {    // failure link simulation file provided
-                std::ifstream vidFile(fname);
-                if (!vidFile.good())
-                    throw cRuntimeError("Unable to load failure partition assignment file");
+//                 unsigned int nodeVid;
+//                 std::string line;
+//                 while (std::getline(vidFile, line)) {   // for each line in file
+//                     if (line.rfind(startstr, 0) == 0) { // line begins with startstr
+//                         cStringTokenizer tokenizer(line.c_str() + strlen(startstr), /*delimiters=*/", ");    // start parsing after startstr
+//                         const char *token = tokenizer.nextToken();
+//                         ASSERT(token != nullptr);
+//                         operation = token;
+//                         ASSERT(failureOpTimeIndex < failureOpTimeList.size());
+//                         failureNodeSimulationStartTime = failureOpTimeList[failureOpTimeIndex++];
+//                     } else {
+//                         std::istringstream iss(line);
+//                         std::string token;
+//                         std::vector<unsigned int> vidlist;
+//                         while(std::getline(iss, token, ',')) {  // split line with delimiter character ','
+//                             try{
+//                                 nodeVid = std::stoul(token, nullptr, 0); // base=0: base used is determined by format in vidstr
+//                                 vidlist.push_back(nodeVid);
+//                             }
+//                             catch (std::exception& e) {
+//                                 throw cRuntimeError("Error to parse token \"%s\" in failureLink assignment file into unsigned int: %s", token.c_str(), e.what());
+//                             }
+//                         }
+//                         ASSERT(vidlist.size() == 1);
+//                         ASSERT(failureNodeSimulationStartTime > 0);
+//                         // append link if either link end is in failureSimulationMap
+//                         auto failureSimulationItr = failureSimulationMap.find(vidlist[0]);
+//                         if (failureSimulationItr == failureSimulationMap.end())     // failureNode doesn't already exist in failureSimulationMap
+//                             failureSimulationMap.insert({vidlist[0], {{failureNodeSimulationStartTime, operation, {}}}});
+//                         else {
+//                             auto& tuple = failureSimulationItr->second.back();
+//                             ASSERT(std::get<0>(tuple) < failureNodeSimulationStartTime);    // node failure of vidlist[0] at failureNodeSimulationStartTime isn't already scheduled
+//                             failureSimulationItr->second.push_back({failureNodeSimulationStartTime, operation, {}});
+//                         }
+//                     }
+//                 }
+//                 EV_INFO << "Initialized failureSimulationMap with failureNode assignment file" << endl;
+//             }
+//         }
+//         if (!failureSimulationMap.empty()) {    // if failure scheduled, read failure partition assignment file into vidRingRegistry
+//             const char *fname = par("failureRingPartitionFile");
+//             // if (strlen(fname) == 0)
+//             //     throw cRuntimeError("Failure simulated but failure partition assignment file not provided");
+//             if (strlen(fname) > 0) {    // failure link simulation file provided
+//                 std::ifstream vidFile(fname);
+//                 if (!vidFile.good())
+//                     throw cRuntimeError("Unable to load failure partition assignment file");
                 
-                // NOTE vidRingRegistry[i+1].first = failureOpTimeList[i] bc vidRingRegistry[0].first = 0
-                int failureOpTimeIndex = 0;
-                double vidRingRegistryStartTime = 0;
-                int vidRingRegistryIndex;
+//                 // NOTE vidRingRegistry[i+1].first = failureOpTimeList[i] bc vidRingRegistry[0].first = 0
+//                 int failureOpTimeIndex = 0;
+//                 double vidRingRegistryStartTime = 0;
+//                 int vidRingRegistryIndex;
                 
-                std::string line;
-                const char *token;
-                while (std::getline(vidFile, line)) {   // for each line in file
-                    if (line.rfind(startstr, 0) == 0) { // line begins with startstr
-                        cStringTokenizer tokenizer(line.c_str() + strlen(startstr), /*delimiters=*/", ");    // start parsing after startstr
-                        const char *token = tokenizer.nextToken();
-                        ASSERT(token != nullptr);
-                        // failureLinkSimulationStartTime = (double)atoi(token);
-                        // token = tokenizer.nextToken();
-                        // ASSERT(token != nullptr);
-                        // operation = token;
-                        ASSERT(failureOpTimeIndex < failureOpTimeList.size());
-                        vidRingRegistryIndex = failureOpTimeIndex + 1;
-                        vidRingRegistryStartTime = failureOpTimeList[failureOpTimeIndex++];
-                        if (vidRingRegistryIndex >= vidRingRegistry.size())
-                            vidRingRegistry.push_back({vidRingRegistryStartTime, {}});    // initialize vidRingRegistry at a failure operation time
-                    } else {
-                        vidRingRegistry[vidRingRegistryIndex].second.push_back({});           // initialize empty component in vidRingRegistry[failureOpTime]
+//                 std::string line;
+//                 const char *token;
+//                 while (std::getline(vidFile, line)) {   // for each line in file
+//                     if (line.rfind(startstr, 0) == 0) { // line begins with startstr
+//                         cStringTokenizer tokenizer(line.c_str() + strlen(startstr), /*delimiters=*/", ");    // start parsing after startstr
+//                         const char *token = tokenizer.nextToken();
+//                         ASSERT(token != nullptr);
+//                         // failureLinkSimulationStartTime = (double)atoi(token);
+//                         // token = tokenizer.nextToken();
+//                         // ASSERT(token != nullptr);
+//                         // operation = token;
+//                         ASSERT(failureOpTimeIndex < failureOpTimeList.size());
+//                         vidRingRegistryIndex = failureOpTimeIndex + 1;
+//                         vidRingRegistryStartTime = failureOpTimeList[failureOpTimeIndex++];
+//                         if (vidRingRegistryIndex >= vidRingRegistry.size())
+//                             vidRingRegistry.push_back({vidRingRegistryStartTime, {}});    // initialize vidRingRegistry at a failure operation time
+//                     } else {
+//                         vidRingRegistry[vidRingRegistryIndex].second.push_back({});           // initialize empty component in vidRingRegistry[failureOpTime]
                         
-                        cStringTokenizer tokenizer(line.c_str(), /*delimiters=*/", ");    // start parsing after startstr
-                        while ((token = tokenizer.nextToken()) != nullptr) {
-                            try{
-                                vidRingRegistry[vidRingRegistryIndex].second.back().insert( (unsigned int)std::stoul(token, nullptr, 0) ); // base=0: base used is determined by format in vidstr
-                            }
-                            catch (std::exception& e) {
-                                throw cRuntimeError("Error to parse token \"%s\" in failure partition assignment file (vidRingRegistryIndex=%d, componentIndex=%d) into unsigned int: %s", token, vidRingRegistryIndex, vidRingRegistry[vidRingRegistryIndex].second.size()-1, e.what());
-                            }
-                        }                    
+//                         cStringTokenizer tokenizer(line.c_str(), /*delimiters=*/", ");    // start parsing after startstr
+//                         while ((token = tokenizer.nextToken()) != nullptr) {
+//                             try{
+//                                 vidRingRegistry[vidRingRegistryIndex].second.back().insert( (unsigned int)std::stoul(token, nullptr, 0) ); // base=0: base used is determined by format in vidstr
+//                             }
+//                             catch (std::exception& e) {
+//                                 throw cRuntimeError("Error to parse token \"%s\" in failure partition assignment file (vidRingRegistryIndex=%d, componentIndex=%d) into unsigned int: %s", token, vidRingRegistryIndex, vidRingRegistry[vidRingRegistryIndex].second.size()-1, e.what());
+//                             }
+//                         }                    
 
-                        if (vidRingRegistry[vidRingRegistryIndex].second.back().empty())
-                            throw cRuntimeError("Failure partition assignment file (vidRingRegistryIndex=%d, componentIndex=%d) error: not vid connected", vidRingRegistryIndex, vidRingRegistry[vidRingRegistryIndex].second.size()-1);
-                    }
-                }
-            } else  // if failure scheduled but failure link simulation file not provided, perhaps only link failures simulated and they don't cause partition 
-                EV_WARN << "Failure simulated but failure partition assignment file not provided" << endl;
-        }
-    } 
-}
+//                         if (vidRingRegistry[vidRingRegistryIndex].second.back().empty())
+//                             throw cRuntimeError("Failure partition assignment file (vidRingRegistryIndex=%d, componentIndex=%d) error: not vid connected", vidRingRegistryIndex, vidRingRegistry[vidRingRegistryIndex].second.size()-1);
+//                     }
+//                 }
+//             } else  // if failure scheduled but failure link simulation file not provided, perhaps only link failures simulated and they don't cause partition 
+//                 EV_WARN << "Failure simulated but failure partition assignment file not provided" << endl;
+//         }
+//     } 
+// }
 
 void RoutingBase::initializeSelfTestDstList()
 {
@@ -671,17 +735,17 @@ void RoutingBase::initializeWriteRoutingTableToFileTimes()
     const char *fname = par("routingTableVidCSVFile");
     const char *writeTimesPar = par("writeRoutingTableToFileTimes");
     if (strlen(fname) > 0 && strlen(writeTimesPar) > 0) {    // routingTable file provided, write times string also provided
-        if (writeRoutingTableToFileTimes.empty()) {     // writeRoutingTableToFileTimes not initialized yet
-            cStringTokenizer tokenizer(writeTimesPar, /*delimiters=*/", ");
-            const char *token;
-            while ((token = tokenizer.nextToken()) != nullptr)
-                writeRoutingTableToFileTimes.push_back((double)atoi(token));
+        // if (writeRoutingTableToFileTimes.empty()) {     // Commented out bc it's no longer a static variable -- writeRoutingTableToFileTimes not initialized yet
+        cStringTokenizer tokenizer(writeTimesPar, /*delimiters=*/", ");
+        const char *token;
+        while ((token = tokenizer.nextToken()) != nullptr)
+            writeRoutingTableToFileTimes.push_back((double)atoi(token));
 
-            EV_INFO << "Initialized writeRoutingTableToFileTimes = [";
-            for (const auto& time : writeRoutingTableToFileTimes)
-                EV_INFO << time << ' ';
-            EV_INFO << "] with routingTable file name = " << fname << endl;
-        }
+        EV_INFO << "Initialized writeRoutingTableToFileTimes = [";
+        for (const auto& time : writeRoutingTableToFileTimes)
+            EV_INFO << time << ' ';
+        EV_INFO << "] with routingTable file name = " << fname << endl;
+    
         if (writeRoutingTableToFileTimes.empty())
             throw cRuntimeError("RoutingTable write file specified but writeRoutingTableToFileTimes is empty");
         scheduleAt(writeRoutingTableToFileTimes[0], writeRoutingTableTimer);
@@ -693,17 +757,17 @@ void RoutingBase::initializeWriteNodeStatsTimes()
     // get write routingTable to file and times, see if it's provided
     const char *writeTimesPar = par("writeNodeStatsTimes");
     if (strlen(writeTimesPar) > 0) {    // write times string provided
-        if (writeNodeStatsTimes.empty()) {     // writeNodeStatsTimes not initialized yet
-            cStringTokenizer tokenizer(writeTimesPar, /*delimiters=*/", ");
-            const char *token;
-            while ((token = tokenizer.nextToken()) != nullptr)
-                writeNodeStatsTimes.push_back((double)atoi(token));
+        // if (writeNodeStatsTimes.empty()) {     // Commented out bc it's no longer a static variable -- writeNodeStatsTimes not initialized yet
+        cStringTokenizer tokenizer(writeTimesPar, /*delimiters=*/", ");
+        const char *token;
+        while ((token = tokenizer.nextToken()) != nullptr)
+            writeNodeStatsTimes.push_back((double)atoi(token));
 
-            EV_INFO << "Initialized writeNodeStatsTimes = [";
-            for (const auto& time : writeNodeStatsTimes)
-                EV_INFO << time << ' ';
-            EV_INFO << "]" << endl;
-        }
+        EV_INFO << "Initialized writeNodeStatsTimes = [";
+        for (const auto& time : writeNodeStatsTimes)
+            EV_INFO << time << ' ';
+        EV_INFO << "]" << endl;
+        
         if (writeNodeStatsTimes.empty())
             throw cRuntimeError("Write nodeStats times specified but writeNodeStatsTimes is empty");
         scheduleAt(writeNodeStatsTimes[0], writeNodeStatsTimer);
@@ -728,6 +792,32 @@ void RoutingBase::processWriteNodeStatsTimer()
         scheduleAt(writeNodeStatsTimes.at(i+1), writeNodeStatsTimer);
 }
 
+void RoutingBase::processWriteReceivedMsgAggTimer()
+{
+    EV_DEBUG << "Processing writeReceivedMsgAggTimer at node " << vid << endl;
+    if (!receivedMsgAggregate.empty()) {    // if there are received messages in the past period
+        writeReceivedMsgAggToRecords();
+        // schedule next writeReceivedMsgAggTimer
+        scheduleAt(simTime() + recordReceivedMsgAggPeriod, writeReceivedMsgAggTimer);
+    }
+}
+
+void RoutingBase::writeReceivedMsgAggToRecords()
+{
+    EV_DEBUG << "Writting receivedMsgAggregate to allSendRecords at node " << vid << endl;
+    // record received messages of the same type as one aggregated record in allSendRecords
+    for (auto recvItr = receivedMsgAggregate.begin(); recvItr != receivedMsgAggregate.end(); ++recvItr) {
+        std::ostringstream s;
+        double avgHopcount = (double) /*total hopcount*/ std::get<1>(recvItr->second) / (double) /*number of messages*/ std::get<0>(recvItr->second);
+        s << vid << ',' /*<< src*/ << ',' /*<< msgId*/ << ',' /*<< dst*/ << ',' << recordSimTimeToString(simTime(), /*precision=*/3) << ',' << recordMessageFieldToString(/*msgType=*/recvItr->first.c_str()) << ','
+                << recordMessageFieldToString("received") << ',' << /*hopcount=*/recordSimTimeToString(avgHopcount, /*precision=*/0) << ',' << /*chunkByteLength=*/std::get<2>(recvItr->second) << ',' /*<< infoStr*/ << ','
+                << /*numMsgs=*/std::get<0>(recvItr->second);
+        std::string msgstr = s.str();
+        allSendRecords.push_back(msgstr);
+    }
+    receivedMsgAggregate.clear();
+}
+
 // record message record in allSendRecords
 // action can be 0: sending, 1: receiving, 2: processing
 void RoutingBase::recordMessageRecord(char action, const VlrRingVID& src, const VlrRingVID& dst, const char *msgType, unsigned int msgId, unsigned int hopcount, unsigned int chunkByteLength, const char *infoStr/*=""*/)
@@ -739,19 +829,40 @@ void RoutingBase::recordMessageRecord(char action, const VlrRingVID& src, const 
         case 0:     // record a message to send in allSendRecords
             // Commented out bc we increment allSendMessageId when create a message
             // allSendMessageId++;     // increment message id for each message sent
-            s << vid << ',' << src << ',' << allSendMessageId << ',' << dst << ',' << simTime() << ',' << msgType << ',' << "sent" << ",,," << infoStr;
+            s << vid << ',' << src << ',' << allSendMessageId << ',' << dst << ',' << recordSimTimeToString(simTime(), /*precision=*/3) << ',' << recordMessageFieldToString(msgType) << ',' << recordMessageFieldToString("sent") << ",,," << infoStr << ',' /*<< numMsgs*/;
             allSendRecords.push_back(s.str());
             break;
         case 1:     // record a received message destined for me in allSendRecords
-            s << vid << ',' << src << ',' << msgId << ',' << dst << ',' << simTime() << ',' << msgType << ',' << "arrived" << ',' << hopcount << ',' << chunkByteLength << ',' << infoStr;
+            s << vid << ',' << src << ',' << msgId << ',' << dst << ',' << recordSimTimeToString(simTime(), /*precision=*/3) << ',' << recordMessageFieldToString(msgType) << ',' << recordMessageFieldToString("arrived") << ',' << hopcount << ',' << chunkByteLength << ',' << infoStr << ',' /*<< numMsgs*/;
             allSendRecords.push_back(s.str());
             break;
         case 2:     // record a message received in allSendRecords
-            s << vid << ',' << src << ',' << msgId << ',' << dst << ',' << simTime() << ',' << msgType << ',' << "received" << ',' << hopcount << ',' << chunkByteLength << ',' << infoStr;
-            allSendRecords.push_back(s.str());
+        {
+            if (recordReceivedMsgAggPeriod > 0) {   // aggregate received message records in receivedMsgAggregate
+                auto itr_bool = receivedMsgAggregate.insert({msgType, {/*numMsgs=*/1, hopcount, chunkByteLength}});
+                if (!itr_bool.second) { // msgType already exists in receivedMsgAggregate
+                    auto recvItr = itr_bool.first;
+                    unsigned int& numMsgs = std::get<0>(recvItr->second);
+                    unsigned int& totalHopcount = std::get<1>(recvItr->second);
+                    unsigned int& totalChunkByteLen = std::get<2>(recvItr->second);
+                    numMsgs++;
+                    totalHopcount += hopcount;
+                    totalChunkByteLen += chunkByteLength;
+                }
+                // schedule writeReceivedMsgAggTimer to write aggregated message records in receivedMsgAggregate to allSendRecords
+                if (!writeReceivedMsgAggTimer->isScheduled()) {
+                    int64_t nextWriteTime = simTime().dbl() + 1;    // round up to the next integer after current time
+                    scheduleAt(nextWriteTime, writeReceivedMsgAggTimer);
+                }
+        
+            } else {    // one record for each received message, write directly in allSendRecords
+                s << vid << ',' << src << ',' << msgId << ',' << dst << ',' << recordSimTimeToString(simTime(), /*precision=*/3) << ',' << recordMessageFieldToString(msgType) << ',' << recordMessageFieldToString("received") << ',' << hopcount << ',' << chunkByteLength << ',' << infoStr << ',' /*<< numMsgs*/;
+                allSendRecords.push_back(s.str());
+            }
             break;
+        }
         case 4:     // record a message dropped in allSendRecords
-            s << vid << ',' << src << ',' << msgId << ',' << dst << ',' << simTime() << ',' << msgType << ',' << "dropped" << ',' << hopcount << ',' << chunkByteLength << ',' << infoStr;
+            s << vid << ',' << src << ',' << msgId << ',' << dst << ',' << recordSimTimeToString(simTime(), /*precision=*/3) << ',' << recordMessageFieldToString(msgType) << ',' << recordMessageFieldToString("dropped") << ',' << hopcount << ',' << chunkByteLength << ',' << infoStr << ',' /*<< numMsgs*/;
             allSendRecords.push_back(s.str());
             break;
     }
@@ -764,6 +875,29 @@ void RoutingBase::recordNodeStatsRecord(const char *infoStr)
 
     s << vid << ',' << simTime() << ',' << infoStr;
     allNodeRecords.push_back(s.str());
+}
+
+// record time in allSendRecords (allNodeRecords file size isn't of concern)
+std::string RoutingBase::recordSimTimeToString(simtime_t_cref time, int precision) const
+{
+    return recordDoubleToString(time.dbl(), precision);
+}
+
+// convert double to string specifying precision
+std::string RoutingBase::recordDoubleToString(double num, int precision) const
+{
+    std::ostringstream s;
+    s << std::fixed << std::setprecision(precision) << num;
+    return s.str();
+}
+
+std::string RoutingBase::recordMessageFieldToString(const char *msgType) const
+{
+    auto itr = sendRecordStringShortVerMap.find(msgType);
+    if (itr == sendRecordStringShortVerMap.end())
+        return msgType;
+    else
+        return itr->second;
 }
 
 void RoutingBase::writeToResultNodeFile()
@@ -824,7 +958,7 @@ void RoutingBase::writeToResultMessageFile()
 
 std::ostream &operator<<(std::ostream &o, const std::vector<unsigned int> &vids)
 {
-    o << "[ ";
+    o << "[";
     for (auto& vid : vids) {
         o << vid << " ";
     }
@@ -834,7 +968,7 @@ std::ostream &operator<<(std::ostream &o, const std::vector<unsigned int> &vids)
 
 std::ostream &operator<<(std::ostream &o, const std::set<unsigned int> &vids)
 {
-    o << "{ ";
+    o << "{";
     for (auto& vid : vids) {
         o << vid << " ";
     }

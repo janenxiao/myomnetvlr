@@ -19,8 +19,9 @@ simple NetBuilder
         string nodesFile;
         string connectionsFile;
         string nodeType;
+        string routingConfiguratorType = default("");    // if provided, create "routingConfigurator" module in network
+        
         double channelDelay @unit(s) = default(0s);	// propagation delay
         double channelBitErrorRate = default(0);	//  ratio between the number of bits incorrectly received and the total number of bits transmitted
         double channelDatarate @unit(bps) = default(2Mbps);	// bits per second; 0=infinite
-
 }

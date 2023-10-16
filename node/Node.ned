@@ -20,7 +20,8 @@ module Node
 {
     parameters:
         int address;
-//        string appType;
+        // string appType;
+        routing.routingConfigModule = default("^.^.routingConfigurator");
         @display("i=misc/node_vs,gold");
     gates:
         inout port[];
